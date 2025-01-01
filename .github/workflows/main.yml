@@ -1,0 +1,6 @@
+steps:
+- name: Checkout code
+  uses: actions/checkout@v2
+
+- name: Extract some files
+  run: 7z x fanbbsapi-dev.zip
