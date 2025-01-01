@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.Fanbbs.dao.TaskDao">
+    <resultMap id="BaseResultMap" type="com.Fanbbs.entity.Task">
+        <result column="id" property="id"/>
+        <result column="day_point" property="day_point"/>
+        <result column="day_exp" property="day_exp"/>
+        <result column="comment_point" property="comment_point"/>
+        <result column="comment_exp" property="comment_exp"/>
+        <result column="comment_times" property="comment_times"/>
+        <result column="publish_point" property="publish_point"/>
+        <result column="publish_exp" property="publish_exp"/>
+        <result column="publish_times" property="publish_times"/>
+        <result column="share_point" property="share_point"/>
+        <result column="share_exp" property="share_exp"/>
+        <result column="share_times" property="share_times"/>
+        <result column="like_point" property="like_point"/>
+        <result column="like_exp" property="like_exp"/>
+        <result column="like_times" property="like_times"/>
+        <result column="mark_point" property="mark_point"/>
+        <result column="mark_exp" property="mark_exp"/>
+        <result column="mark_times" property="mark_times"/>
+        <result column="view_point" property="view_point"/>
+        <result column="view_exp" property="view_exp"/>
+        <result column="view_times" property="view_times"/>
+        <result column="acc_sign" property="acc_sign"/>
+        <result column="acc_exp" property="acc_exp"/>
+        <result column="acc_point" property="acc_point"/>
+        <result column="punish" property="punish"/>
+
+    </resultMap>
+    <sql id="Base_Column_List">
+        `id`,
+        `day_point`,
+        `day_exp`,
+        `comment_point`,
+        `comment_exp`,
+        `comment_times`,
+        `publish_point`,
+        `publish_exp`,
+        `publish_times`,
+        `share_point`,
+        `share_exp`,
+        `share_times`,
+        `like_point`,
+        `like_exp`,
+        `like_times`,
+        `mark_point`,
+        `mark_exp`,
+        `mark_times`,
+        `view_point`,
+        `view_exp`,
+        `view_times`,
+        `acc_sign`,
+        `acc_exp`,
+        `acc_point`,
+        `punish`
+
+    </sql>
+
+    <!-- 插入数据 -->
+    <insert id="insert" parameterType="com.Fanbbs.entity.Task" keyProperty="id" useGeneratedKeys="true">
+        INSERT INTO ${prefix}_taskconfig
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test='null != id'>
+                `id`,
+            </if>
+            <if test='null != day_point'>
+                `day_point`,
+            </if>
+            <if test='null != day_exp'>
+                `day_exp`,
+            </if>
+            <if test='null != comment_point'>
+                `comment_point`,
+            </if>
+            <if test='null != comment_exp'>
+                `comment_exp`,
+            </if>
+            <if test='null != comment_times'>
+                `comment_times`,
+            </if>
+            <if test='null != publish_point'>
+                `publish_point`,
+            </if>
+            <if test='null != publish_exp'>
+                `publish_exp`,
+            </if>
+            <if test='null != publish_times'>
+                `publish_times`,
+            </if>
+            <if test='null != share_point'>
+                `share_point`,
+            </if>
+            <if test='null != share_exp'>
+                `share_exp`,
+            </if>
+            <if test='null != share_times'>
+                `share_times`,
+            </if>
+            <if test='null != like_point'>
+                `like_point`,
+            </if>
+            <if test='null != like_exp'>
+                `like_exp`,
+            </if>
+            <if test='null != like_times'>
+                `like_times`,
+            </if>
+            <if test='null != mark_point'>
+                `mark_point`,
+            </if>
+            <if test='null != mark_exp'>
+                `mark_exp`,
+            </if>
+            <if test='null != mark_times'>
+                `mark_times`,
+            </if>
+            <if test='null != view_point'>
+                `view_point`,
+            </if>
+            <if test='null != view_exp'>
+                `view_exp`,
+            </if>
+            <if test='null != view_times'>
+                `view_times`,
+            </if>
+            <if test='null != acc_sign'>
+                `acc_sign`,
+            </if>
+            <if test='null != acc_exp'>
+                `acc_exp`,
+            </if>
+            <if test='null != acc_point'>
+                `acc_point`,
+            </if>
+            <if test='null != punish'>
+                `punish`
+            </if>
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test='null != id'>
+                #{id},
+            </if>
+            <if test='null != day_point'>
+                #{day_point},
+            </if>
+            <if test='null != day_exp'>
+                #{day_exp},
+            </if>
+            <if test='null != comment_point'>
+                #{comment_point},
+            </if>
+            <if test='null != comment_exp'>
+                #{comment_exp},
+            </if>
+            <if test='null != comment_times'>
+                #{comment_times},
+            </if>
+            <if test='null != publish_point'>
+                #{publish_point},
+            </if>
+            <if test='null != publish_exp'>
+                #{publish_exp},
+            </if>
+            <if test='null != publish_times'>
+                #{publish_times},
+            </if>
+            <if test='null != share_point'>
+                #{share_point},
+            </if>
+            <if test='null != share_exp'>
+                #{share_exp},
+            </if>
+            <if test='null != share_times'>
+                #{share_times},
+            </if>
+            <if test='null != like_point'>
+                #{like_point},
+            </if>
+            <if test='null != like_exp'>
+                #{like_exp},
+            </if>
+            <if test='null != like_times'>
+                #{like_times},
+            </if>
+            <if test='null != mark_point'>
+                #{mark_point},
+            </if>
+            <if test='null != mark_exp'>
+                #{mark_exp},
+            </if>
+            <if test='null != mark_times'>
+                #{mark_times},
+            </if>
+            <if test='null != view_point'>
+                #{view_point},
+            </if>
+            <if test='null != view_exp'>
+                #{view_exp},
+            </if>
+            <if test='null != view_times'>
+                #{view_times},
+            </if>
+            <if test='null != acc_sign'>
+                #{acc_sign},
+            </if>
+            <if test='null != acc_exp'>
+                #{acc_exp},
+            </if>
+            <if test='null != acc_point'>
+                #{acc_point},
+            </if>
+            <if test='null != punish'>
+                #{punish}
+            </if>
+        </trim>
+    </insert>    <!-- 批量插入数据 -->
+    <insert id="batchInsert" parameterType="java.util.List">
+        INSERT INTO ${prefix}_taskconfig (
+        <include refid="Base_Column_List"/>
+        ) VALUES
+        <foreach collection="list" item="task" separator=",">
+            (
+            #{task.id},
+            #{task.day_point},
+            #{task.day_exp},
+            #{task.comment_point},
+            #{task.comment_exp},
+            #{task.comment_times},
+            #{task.publish_point},
+            #{task.publish_exp},
+            #{task.publish_times},
+            #{task.share_point},
+            #{task.share_exp},
+            #{task.share_times},
+            #{task.like_point},
+            #{task.like_exp},
+            #{task.like_times},
+            #{task.mark_point},
+            #{task.mark_exp},
+            #{task.mark_times},
+            #{task.view_point},
+            #{task.view_exp},
+            #{task.view_times},
+            #{task.acc_sign},
+            #{task.acc_exp},
+            #{task.acc_point},
+            #{task.punish}
+            )
+        </foreach>
+    </insert>
+
+    <!-- 更新 -->
+    <update id="update" parameterType="com.Fanbbs.entity.Task">
+        UPDATE ${prefix}_taskconfig
+        <set>
+            <if test='null != day_point'>`day_point` = #{day_point},</if>
+            <if test='null != day_exp'>`day_exp` = #{day_exp},</if>
+            <if test='null != comment_point'>`comment_point` = #{comment_point},</if>
+            <if test='null != comment_exp'>`comment_exp` = #{comment_exp},</if>
+            <if test='null != comment_times'>`comment_times` = #{comment_times},</if>
+            <if test='null != publish_point'>`publish_point` = #{publish_point},</if>
+            <if test='null != publish_exp'>`publish_exp` = #{publish_exp},</if>
+            <if test='null != publish_times'>`publish_times` = #{publish_times},</if>
+            <if test='null != share_point'>`share_point` = #{share_point},</if>
+            <if test='null != share_exp'>`share_exp` = #{share_exp},</if>
+            <if test='null != share_times'>`share_times` = #{share_times},</if>
+            <if test='null != like_point'>`like_point` = #{like_point},</if>
+            <if test='null != like_exp'>`like_exp` = #{like_exp},</if>
+            <if test='null != like_times'>`like_times` = #{like_times},</if>
+            <if test='null != mark_point'>`mark_point` = #{mark_point},</if>
+            <if test='null != mark_exp'>`mark_exp` = #{mark_exp},</if>
+            <if test='null != mark_times'>`mark_times` = #{mark_times},</if>
+            <if test='null != view_point'>`view_point` = #{view_point},</if>
+            <if test='null != view_exp'>`view_exp` = #{view_exp},</if>
+            <if test='null != view_times'>`view_times` = #{view_times},</if>
+            <if test='null != acc_sign'>`acc_sign` = #{acc_sign},</if>
+            <if test='null != acc_exp'>`acc_exp` = #{acc_exp},</if>
+            <if test='null != acc_point'>`acc_point` = #{acc_point},</if>
+            <if test='null != punish'>`punish` = #{punish}</if>
+        </set>
+        WHERE `id` = #{id}
+    </update>
+
+    <!-- 删除 -->
+    <delete id="delete">
+        DELETE
+        FROM ${prefix}_taskconfig
+        WHERE `id` = #{key}
+    </delete>
+
+    <!-- 批量删除 -->
+    <delete id="batchDelete" parameterType="java.util.List">
+        DELETE FROM ${prefix}_taskconfig WHERE id IN
+        <foreach collection="list" item="item" open="(" separator="," close=")">
+            #{item}
+        </foreach>
+    </delete>
+
+    <!-- 主键查询 -->
+    <select id="selectByKey" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM ${prefix}_taskconfig
+        WHERE `id` = #{key}
+    </select>
+
+    <!-- 条件查询 -->
+    <select id="selectList" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM ${prefix}_taskconfig
+        <where>
+            <if test='null != id'>
+                AND `id` = #{id}
+            </if>
+            <if test='null != day_point'>
+                AND `day_point` = #{day_point}
+            </if>
+            <if test='null != day_exp'>
+                AND `day_exp` = #{day_exp}
+            </if>
+            <if test='null != comment_point'>
+                AND `comment_point` = #{comment_point}
+            </if>
+            <if test='null != comment_exp'>
+                AND `comment_exp` = #{comment_exp}
+            </if>
+            <if test='null != comment_times'>
+                AND `comment_times` = #{comment_times}
+            </if>
+            <if test='null != publish_point'>
+                AND `publish_point` = #{publish_point}
+            </if>
+            <if test='null != publish_exp'>
+                AND `publish_exp` = #{publish_exp}
+            </if>
+            <if test='null != publish_times'>
+                AND `publish_times` = #{publish_times}
+            </if>
+            <if test='null != share_point'>
+                AND `share_point` = #{share_point}
+            </if>
+            <if test='null != share_exp'>
+                AND `share_exp` = #{share_exp}
+            </if>
+            <if test='null != share_times'>
+                AND `share_times` = #{share_times}
+            </if>
+            <if test='null != like_point'>
+                AND `like_point` = #{like_point}
+            </if>
+            <if test='null != like_exp'>
+                AND `like_exp` = #{like_exp}
+            </if>
+            <if test='null != like_times'>
+                AND `like_times` = #{like_times}
+            </if>
+            <if test='null != mark_point'>
+                AND `mark_point` = #{mark_point}
+            </if>
+            <if test='null != mark_exp'>
+                AND `mark_exp` = #{mark_exp}
+            </if>
+            <if test='null != mark_times'>
+                AND `mark_times` = #{mark_times}
+            </if>
+            <if test='null != acc_sign'>
+                AND `acc_sign` = #{acc_sign}
+            </if>
+            <if test='null != acc_exp'>
+                AND `acc_exp` = #{acc_exp}
+            </if>
+            <if test='null != acc_point'>
+                AND `acc_point` = #{acc_point}
+            </if>
+            <if test='null != punish'>
+                AND `punish` = #{punish}
+            </if>
+        </where>
+    </select>
+
+
+    <!-- 分页条件查询 -->
+    <select id="selectPage" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM ${prefix}_taskconfig
+        <where>
+            <if test='null != id'>
+                AND `id` = #{id}
+            </if>
+            <if test='null != day_point'>
+                AND `day_point` = #{day_point}
+            </if>
+            <if test='null != day_exp'>
+                AND `day_exp` = #{day_exp}
+            </if>
+            <if test='null != comment_point'>
+                AND `comment_point` = #{comment_point}
+            </if>
+            <if test='null != comment_exp'>
+                AND `comment_exp` = #{comment_exp}
+            </if>
+            <if test='null != comment_times'>
+                AND `comment_times` = #{comment_times}
+            </if>
+            <if test='null != publish_point'>
+                AND `publish_point` = #{publish_point}
+            </if>
+            <if test='null != publish_exp'>
+                AND `publish_exp` = #{publish_exp}
+            </if>
+            <if test='null != publish_times'>
+                AND `publish_times` = #{publish_times}
+            </if>
+            <if test='null != share_point'>
+                AND `share_point` = #{share_point}
+            </if>
+            <if test='null != share_exp'>
+                AND `share_exp` = #{share_exp}
+            </if>
+            <if test='null != share_times'>
+                AND `share_times` = #{share_times}
+            </if>
+            <if test='null != acc_sign'>
+                AND `acc_sign` = #{acc_sign}
+            </if>
+            <if test='null != acc_exp'>
+                AND `acc_exp` = #{acc_exp}
+            </if>
+            <if test='null != acc_point'>
+                AND `acc_point` = #{acc_point}
+            </if>
+        </where>
+        <if test="order != null and order != ''">
+            ORDER BY ${order}
+        </if>
+        LIMIT #{page,jdbcType=INTEGER}, #{pageSize,jdbcType=INTEGER}
+    </select>
+
+    <!-- 总量查询 -->
+    <select id="total" resultType="java.lang.Integer">
+        SELECT count(*) FROM ${prefix}_taskconfig
+        <where>
+            <if test='null != id'>
+                AND `id` = #{id}
+            </if>
+            <if test='null != day_point'>
+                AND `day_point` = #{day_point}
+            </if>
+            <if test='null != day_exp'>
+                AND `day_exp` = #{day_exp}
+            </if>
+            <if test='null != comment_point'>
+                AND `comment_point` = #{comment_point}
+            </if>
+            <if test='null != comment_exp'>
+                AND `comment_exp` = #{comment_exp}
+            </if>
+            <if test='null != comment_times'>
+                AND `comment_times` = #{comment_times}
+            </if>
+            <if test='null != publish_point'>
+                AND `publish_point` = #{publish_point}
+            </if>
+            <if test='null != publish_exp'>
+                AND `publish_exp` = #{publish_exp}
+            </if>
+            <if test='null != publish_times'>
+                AND `publish_times` = #{publish_times}
+            </if>
+            <if test='null != share_point'>
+                AND `share_point` = #{share_point}
+            </if>
+            <if test='null != share_exp'>
+                AND `share_exp` = #{share_exp}
+            </if>
+            <if test='null != share_times'>
+                AND `share_times` = #{share_times}
+            </if>
+            <if test='null != acc_sign'>
+                AND `acc_sign` = #{acc_sign}
+            </if>
+            <if test='null != acc_exp'>
+                AND `acc_exp` = #{acc_exp}
+            </if>
+            <if test='null != acc_point'>
+                AND `acc_point` = #{acc_point}
+            </if>
+        </where>
+    </select>
+</mapper>
