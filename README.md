@@ -79,14 +79,20 @@ The commerce/gamification integration cases cover admin RBAC, public catalog rea
 
 ## Synthetic migration rehearsal
 
-`cmd/importlegacy` has no network or MySQL capability. It refuses to open the target database until both `--synthetic` is passed and the JSON document declares `"source":"synthetic"` with `mapping_version: 1`. It accepts either `--driver sqlite --db ...` or `--driver postgres --database-url ...`.
+`cmd/importlegacy` has no legacy-network or MySQL capability. It refuses to open the target database until both `--synthetic` is passed and the JSON document declares `"source":"synthetic"` with `mapping_version: 1`. It accepts either the normalized fixture layout or `--format fanbbs-java`, an authentic row-shaped fixture that must additionally declare `"schema":"fanbbs-java-installcontroller-v1"`. The target can be local SQLite or the configured PostgreSQL adapter.
 
 ```sh
 /tmp/go1.26.5/bin/go run ./cmd/importlegacy \
   --synthetic --input ./path/to/generated-fixture.json --db ./rehearsal.db
+
+/tmp/go1.26.5/bin/go run ./cmd/importlegacy \
+  --synthetic --format fanbbs-java \
+  --input ./path/to/generated-authentic-shape-fixture.json --db ./rehearsal.db
 ```
 
-The synthetic mapping-v1 importer creates deterministic IDs/run hashes, maps users with imported login credentials explicitly disabled, category/tag taxonomy, posts and threaded comments, quarantines unsupported/orphan/paid rows, reconciles per-entity counts, and makes an identical input idempotent. It is a migration rehearsal tool, never a real-data connector.
+The authentic-shape adapter mirrors the installer-backed Java tables for users, contents, comments, metas/relationships and fan follows. The importer creates deterministic IDs/run hashes, maps category/tag joins, posts, threaded comments and follows, quarantines unsupported/orphan/paid rows, and makes an identical input idempotent. Legacy media strings are inventoried and quarantined for a separate verified blob-copy pass; the command never fetches them.
+
+Legacy password values are discarded and every imported password is the invalid `legacy-login-disabled` sentinel. The importer creates neither sessions nor recovery codes, so imported accounts remain unable to log in. A separately approved identity-proofing/account-claim flow must set a new Argon2id password and issue new recovery codes before production activation. See `docs/legacy-schema-mapping.md` for the evidence, exact mapping and remaining gates. This remains a synthetic migration rehearsal tool, never a real-data connector.
 
 ## Response contract
 
@@ -124,7 +130,7 @@ internal/commerce       local non-payment catalog, bounded inventory, carts,
                         orders, manual fulfillment and non-cash gamification
 internal/capabilities   disabled external/regulated interfaces
 internal/blob           blob interface and bounded local-filesystem adapter
-internal/legacyimport   synthetic-only deterministic mapper and quarantine report
+internal/legacyimport   synthetic-only authentic-schema adapter, mapper and quarantine report
 internal/platform       HTTP envelope, IDs, SQLite and pgx/PostgreSQL bootstrap
 migrations              embedded SQLite and PostgreSQL schema sources of truth
 api/openapi.yaml        public API contract

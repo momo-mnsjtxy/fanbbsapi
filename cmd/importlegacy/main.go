@@ -1,5 +1,5 @@
 // importlegacy rehearses mappings from a synthetic JSON fixture only. It opens
-// the target database only after both the flag and document marker are verified.
+// the target database only after the flag, source marker and input schema are verified.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 func main() {
 	inputPath := flag.String("input", "", "synthetic legacy JSON fixture")
+	inputFormat := flag.String("format", "normalized", "synthetic input layout: normalized or fanbbs-java")
 	databasePath := flag.String("db", "legacy-import.db", "local SQLite target")
 	adapter := flag.String("driver", "sqlite", "target adapter: sqlite or postgres")
 	databaseURL := flag.String("database-url", "", "PostgreSQL target URL (required with --driver postgres)")
@@ -32,11 +33,25 @@ func main() {
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	var document legacyimport.Document
-	if err := decoder.Decode(&document); err != nil {
-		log.Fatal(err)
+	switch *inputFormat {
+	case "normalized":
+		if err := decoder.Decode(&document); err != nil {
+			log.Fatal(err)
+		}
+	case "fanbbs-java":
+		var snapshot legacyimport.AuthenticSnapshot
+		if err := decoder.Decode(&snapshot); err != nil {
+			log.Fatal(err)
+		}
+		document, err = legacyimport.AdaptAuthenticSnapshot(snapshot)
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("refusing import: unknown synthetic input format %q", *inputFormat)
 	}
-	if document.Source != "synthetic" {
-		log.Fatal("refusing import: document source is not synthetic")
+	if document.Source != "synthetic" || document.MappingVersion != 1 {
+		log.Fatal("refusing import: document must declare source synthetic and mapping_version 1")
 	}
 	target := *databasePath
 	if *databaseURL != "" {

@@ -16,12 +16,14 @@ import (
 )
 
 type Document struct {
-	Source         string           `json:"source"`
-	MappingVersion int              `json:"mapping_version"`
-	Users          []LegacyUser     `json:"users"`
-	Taxonomy       []LegacyTaxonomy `json:"taxonomy"`
-	Posts          []LegacyPost     `json:"posts"`
-	Comments       []LegacyComment  `json:"comments"`
+	Source         string                 `json:"source"`
+	MappingVersion int                    `json:"mapping_version"`
+	Users          []LegacyUser           `json:"users"`
+	Taxonomy       []LegacyTaxonomy       `json:"taxonomy"`
+	Posts          []LegacyPost           `json:"posts"`
+	Comments       []LegacyComment        `json:"comments"`
+	Follows        []LegacyFollow         `json:"follows"`
+	Media          []LegacyMediaReference `json:"media"`
 }
 
 type LegacyUser struct {
@@ -29,6 +31,7 @@ type LegacyUser struct {
 	Handle      string `json:"handle"`
 	Email       string `json:"email"`
 	DisplayName string `json:"display_name"`
+	Bio         string `json:"bio"`
 	Role        string `json:"role"`
 	Status      string `json:"status"`
 	CreatedAt   string `json:"created_at"`
@@ -42,15 +45,35 @@ type LegacyTaxonomy struct {
 }
 
 type LegacyPost struct {
+	ID         string   `json:"id"`
+	AuthorID   string   `json:"author_id"`
+	Kind       string   `json:"kind"`
+	Title      string   `json:"title"`
+	Body       string   `json:"body"`
+	CategoryID string   `json:"category_id"`
+	TagIDs     []string `json:"tag_ids"`
+	Status     string   `json:"status"`
+	Paid       bool     `json:"paid"`
+	CreatedAt  string   `json:"created_at"`
+}
+
+type LegacyFollow struct {
 	ID         string `json:"id"`
-	AuthorID   string `json:"author_id"`
-	Kind       string `json:"kind"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	CategoryID string `json:"category_id"`
-	Status     string `json:"status"`
-	Paid       bool   `json:"paid"`
+	FollowerID string `json:"follower_id"`
+	FollowedID string `json:"followed_id"`
 	CreatedAt  string `json:"created_at"`
+}
+
+// LegacyMediaReference inventories a legacy URL/path only. It deliberately
+// lacks bytes, MIME type, size and checksum, so the importer can never mistake
+// it for a verified target media asset.
+type LegacyMediaReference struct {
+	ID          string `json:"id"`
+	EntityType  string `json:"entity_type"`
+	EntityID    string `json:"entity_id"`
+	OwnerID     string `json:"owner_id"`
+	SourceField string `json:"source_field"`
+	Location    string `json:"location"`
 }
 
 type LegacyComment struct {
@@ -76,6 +99,8 @@ type Report struct {
 	Taxonomy   Counts         `json:"taxonomy"`
 	Posts      Counts         `json:"posts"`
 	Comments   Counts         `json:"comments"`
+	Follows    Counts         `json:"follows"`
+	Media      Counts         `json:"media"`
 	Reasons    map[string]int `json:"quarantine_reasons"`
 }
 
@@ -118,6 +143,7 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 		RunID: runID, SourceHash: sourceHash, Reasons: map[string]int{},
 		Users: Counts{Read: len(canonical.Users)}, Taxonomy: Counts{Read: len(canonical.Taxonomy)},
 		Posts: Counts{Read: len(canonical.Posts)}, Comments: Counts{Read: len(canonical.Comments)},
+		Follows: Counts{Read: len(canonical.Follows)}, Media: Counts{Read: len(canonical.Media)},
 	}
 	tx, err := importer.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -153,8 +179,8 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 		newID := deterministicID("usr", user.ID)
 		created := normalizedTime(user.CreatedAt)
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO users(id, handle, email, password_hash, display_name, role, status, created_at, updated_at)
-			VALUES (?, ?, ?, 'legacy-login-disabled', ?, ?, ?, ?, ?)`, newID, user.Handle, user.Email, fallback(user.DisplayName, user.Handle), role, status, created, created)
+			INSERT INTO users(id, handle, email, password_hash, display_name, bio, role, status, created_at, updated_at)
+			VALUES (?, ?, ?, 'legacy-login-disabled', ?, ?, ?, ?, ?, ?)`, newID, user.Handle, user.Email, fallback(user.DisplayName, user.Handle), user.Bio, role, status, created, created)
 		if err != nil {
 			if err := importer.quarantine(ctx, tx, report.RunID, "user", user.ID, "target_conflict", user, &report, now); err != nil {
 				return Report{}, err
@@ -217,8 +243,6 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 		slugs[key] = true
 		report.Taxonomy.Imported++
 	}
-	_ = tagIDs // Tag relationships are intentionally absent from the minimal synthetic v1 shape.
-
 	postIDs := map[string]string{}
 	for _, post := range canonical.Posts {
 		reason := ""
@@ -241,6 +265,17 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 				reason = "orphan_post_category"
 			}
 		}
+		resolvedTagIDs := make([]string, 0, len(post.TagIDs))
+		for _, legacyTagID := range post.TagIDs {
+			tagID := tagIDs[legacyTagID]
+			if tagID == "" {
+				if reason == "" {
+					reason = "orphan_post_tag"
+				}
+				break
+			}
+			resolvedTagIDs = append(resolvedTagIDs, tagID)
+		}
 		if reason != "" {
 			if err := importer.quarantine(ctx, tx, runID, "post", post.ID, reason, post, &report, now); err != nil {
 				return Report{}, err
@@ -260,8 +295,48 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 		if err != nil {
 			return Report{}, fmt.Errorf("insert synthetic post %s: %w", post.ID, err)
 		}
+		for _, tagID := range resolvedTagIDs {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO post_tags(post_id, tag_id) VALUES (?, ?)`, newID, tagID); err != nil {
+				return Report{}, fmt.Errorf("insert synthetic post tag %s/%s: %w", post.ID, tagID, err)
+			}
+		}
 		postIDs[post.ID] = newID
 		report.Posts.Imported++
+	}
+	for _, follow := range canonical.Follows {
+		followerID, followedID := userIDs[follow.FollowerID], userIDs[follow.FollowedID]
+		reason := ""
+		if followerID == "" {
+			reason = "orphan_follow_follower"
+		} else if followedID == "" {
+			reason = "orphan_follow_followed"
+		} else if followerID == followedID {
+			reason = "self_follow"
+		}
+		if reason != "" {
+			if err := importer.quarantine(ctx, tx, runID, "follow", follow.ID, reason, follow, &report, now); err != nil {
+				return Report{}, err
+			}
+			report.Follows.Quarantined++
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO follows(follower_id, followed_id, created_at) VALUES (?, ?, ?)`, followerID, followedID, normalizedTime(follow.CreatedAt)); err != nil {
+			if err := importer.quarantine(ctx, tx, runID, "follow", follow.ID, "target_conflict", follow, &report, now); err != nil {
+				return Report{}, err
+			}
+			report.Follows.Quarantined++
+			continue
+		}
+		report.Follows.Imported++
+	}
+	for _, media := range canonical.Media {
+		// Legacy rows contain only a URL/path. Importing an asset requires bytes,
+		// MIME validation, size and checksum, so the offline pass inventories and
+		// quarantines every reference for a later approved blob-copy operation.
+		if err := importer.quarantine(ctx, tx, runID, "media", media.ID, "media_recopy_required", media, &report, now); err != nil {
+			return Report{}, err
+		}
+		report.Media.Quarantined++
 	}
 
 	commentIDs := map[string]string{}
@@ -381,8 +456,27 @@ func canonicalDocument(document Document) Document {
 	sort.Slice(document.Users, func(i, j int) bool { return document.Users[i].ID < document.Users[j].ID })
 	sort.Slice(document.Taxonomy, func(i, j int) bool { return document.Taxonomy[i].ID < document.Taxonomy[j].ID })
 	sort.Slice(document.Posts, func(i, j int) bool { return document.Posts[i].ID < document.Posts[j].ID })
+	for index := range document.Posts {
+		sort.Strings(document.Posts[index].TagIDs)
+		document.Posts[index].TagIDs = uniqueStrings(document.Posts[index].TagIDs)
+	}
 	sort.Slice(document.Comments, func(i, j int) bool { return document.Comments[i].ID < document.Comments[j].ID })
+	sort.Slice(document.Follows, func(i, j int) bool { return document.Follows[i].ID < document.Follows[j].ID })
+	sort.Slice(document.Media, func(i, j int) bool { return document.Media[i].ID < document.Media[j].ID })
 	return document
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	result := values[:1]
+	for _, value := range values[1:] {
+		if value != result[len(result)-1] {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func deterministicID(prefix, legacyID string) string {
