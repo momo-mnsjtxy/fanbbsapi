@@ -22,11 +22,12 @@ func authenticFixture() legacyimport.AuthenticSnapshot {
 			{MID: 11, Name: "旧标签", Type: "tag"},
 		},
 		Relationships: []legacyimport.AuthenticRelationship{
-			{CID: 100, MID: 10}, {CID: 100, MID: 11}, {CID: 100, MID: 11},
+			{CID: 100, MID: 10}, {CID: 100, MID: 11}, {CID: 100, MID: 11}, {CID: 102, MID: 99},
 		},
 		Contents: []legacyimport.AuthenticContent{
 			{CID: 100, MID: 10, Title: "合成旧图片帖", Text: "这是离线合成的旧内容。", AuthorID: 1, Type: "photo", Status: "publish", Images: `["https://synthetic.invalid/post.png"]`, Created: 1_580_515_200},
 			{CID: 101, MID: 10, Title: "合成付费视频", Text: "付费内容不会导入。", AuthorID: 1, Type: "video", Status: "publish", Price: 9, Videos: `[{"src":"https://synthetic.invalid/video.mp4","poster":"https://synthetic.invalid/poster.png"}]`, Created: 1_580_601_600},
+			{CID: 102, Title: "悬空分类内容", Text: "关系目标缺失时必须隔离。", AuthorID: 1, Type: "post", Status: "publish", Created: 1_580_601_601},
 		},
 		Comments: []legacyimport.AuthenticComment{
 			{ID: 201, CID: 100, UID: 2, Text: "合成回复", Parent: 200, All: 200, Type: 0, Created: 1_580_774_400},
@@ -75,13 +76,13 @@ func TestAuthenticShapeAdapterAndOfflineImport(t *testing.T) {
 	if report.Users != (legacyimport.Counts{Read: 2, Imported: 2}) || report.Taxonomy != (legacyimport.Counts{Read: 2, Imported: 2}) {
 		t.Fatalf("unexpected base counts: %#v", report)
 	}
-	if report.Posts != (legacyimport.Counts{Read: 2, Imported: 1, Quarantined: 1}) || report.Comments != (legacyimport.Counts{Read: 2, Imported: 2}) {
+	if report.Posts != (legacyimport.Counts{Read: 3, Imported: 1, Quarantined: 2}) || report.Comments != (legacyimport.Counts{Read: 2, Imported: 2}) {
 		t.Fatalf("unexpected content counts: %#v", report)
 	}
 	if report.Follows != (legacyimport.Counts{Read: 2, Imported: 1, Quarantined: 1}) || report.Media != (legacyimport.Counts{Read: 6, Quarantined: 6}) {
 		t.Fatalf("unexpected social/media counts: %#v", report)
 	}
-	if report.Reasons["paid_content_disabled"] != 1 || report.Reasons["orphan_follow_followed"] != 1 || report.Reasons["media_recopy_required"] != 6 {
+	if report.Reasons["paid_content_disabled"] != 1 || report.Reasons["orphan_post_tag"] != 1 || report.Reasons["orphan_follow_followed"] != 1 || report.Reasons["media_recopy_required"] != 6 {
 		t.Fatalf("unexpected quarantine reasons: %#v", report.Reasons)
 	}
 

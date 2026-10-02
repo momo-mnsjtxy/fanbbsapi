@@ -167,6 +167,12 @@ func AdaptAuthenticSnapshot(snapshot AuthenticSnapshot) (Document, error) {
 				categoryCandidates = append(categoryCandidates, metaIDs[mid])
 			case "tag":
 				tagIDs = append(tagIDs, metaIDs[mid])
+			default:
+				// Preserve a dangling relation as an unresolved tag reference so
+				// Import quarantines the affected post instead of silently losing
+				// legacy classification. The sentinel can never resolve to a real
+				// taxonomy row because authentic meta IDs are decimal strings.
+				tagIDs = append(tagIDs, "missing-meta-"+strconv.FormatInt(mid, 10))
 			}
 		}
 		if len(categoryCandidates) > 0 {
