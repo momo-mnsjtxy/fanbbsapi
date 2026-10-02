@@ -1,0 +1,5 @@
+.cache/
+*.db
+*.db-shm
+*.db-wal
+fanbbs-api

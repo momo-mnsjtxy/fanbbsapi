@@ -1,0 +1,1708 @@
+openapi: 3.1.0
+info:
+  title: FanBBS local vertical-slice API
+  version: 0.2.0
+  description: >-
+    Contract for the locally runnable identity, community, private-messaging,
+    notification, moderation, and administration slice. Messaging uses durable
+    HTTP resources plus a polling event cursor; WebSockets and external push are
+    not enabled. External SMS/email/OAuth, payments, withdrawals, lottery, and
+    external object storage are also not enabled. Media uses the bounded
+    local-filesystem development adapter, and SQLite is for local development
+    only rather than the approved production PostgreSQL target.
+servers:
+  - url: http://localhost:8080/api/v1
+security: []
+paths:
+  /auth/register:
+    post:
+      summary: Create a local password account and device session
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [handle, email, password]
+              properties:
+                handle: {type: string, pattern: '^[a-z0-9_]{3,24}$'}
+                email: {type: string, format: email, description: Local login identifier only; this slice sends no email.}
+                password: {type: string, minLength: 8, maxLength: 128}
+                display_name: {type: string, maxLength: 50}
+      responses:
+        '201': {$ref: '#/components/responses/Session'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /auth/login:
+    post:
+      summary: Log in with a handle or email
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identity, password]
+              properties:
+                identity: {type: string, minLength: 1, description: Handle or email. `account` is also accepted.}
+                password: {type: string, minLength: 1}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /auth/refresh:
+    post:
+      summary: Rotate a refresh session
+      operationId: refreshSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+  /auth/logout:
+    post:
+      summary: Revoke the current device session
+      operationId: logout
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Session revoked
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DataEnvelope'}
+        '401': {$ref: '#/components/responses/Error'}
+  /posts:
+    get:
+      summary: List a feed
+      operationId: listPosts
+      parameters:
+        - name: feed
+          in: query
+          schema: {type: string, enum: [recommend, recommended, latest, global, following], default: recommend}
+        - {name: category_id, in: query, schema: {type: string}}
+        - {name: tag_id, in: query, schema: {type: string}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/PostList'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    post:
+      summary: Publish a post
+      operationId: createPost
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreatePost'}
+      responses:
+        '201': {$ref: '#/components/responses/Post'}
+        '200': {description: Idempotent replay, headers: {Idempotency-Replayed: {schema: {type: string, const: 'true'}}}, content: {application/json: {schema: {$ref: '#/components/schemas/PostEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /feeds/{feed}:
+    get:
+      summary: List a named feed
+      operationId: listNamedFeed
+      parameters:
+        - name: feed
+          in: path
+          required: true
+          schema: {type: string, enum: [recommend, recommended, latest, global, following]}
+        - {name: category_id, in: query, schema: {type: string}}
+        - {name: tag_id, in: query, schema: {type: string}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/PostList'}
+        '401': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}:
+    get:
+      summary: Get a published post
+      operationId: getPost
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+      responses:
+        '200': {$ref: '#/components/responses/Post'}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      summary: Edit an owned post with optimistic concurrency control
+      operationId: updatePost
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                title: {type: string, minLength: 3, maxLength: 120}
+                summary: {type: string, maxLength: 500}
+                content: {type: string, minLength: 1, maxLength: 50000}
+                body: {type: string, minLength: 1, maxLength: 50000}
+                category_id: {type: string}
+                tag_ids: {type: array, maxItems: 10, items: {type: string}}
+                visibility: {type: string, enum: [public, followers]}
+      responses:
+        '200': {$ref: '#/components/responses/Post'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Soft-delete an owned post at the expected version
+      operationId: deletePost
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/comments:
+    get:
+      summary: List comments and replies
+      operationId: listComments
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/CommentList'}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      summary: Comment or reply using parent_id
+      operationId: createComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: {type: string, minLength: 1, maxLength: 2000, description: '`body` is also accepted.'}
+                parent_id: {type: string}
+      responses:
+        '201': {$ref: '#/components/responses/Comment'}
+        '200': {$ref: '#/components/responses/Comment'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/comments/{comment_id}/replies:
+    post:
+      summary: Reply to one comment
+      operationId: replyToComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - name: comment_id
+          in: path
+          required: true
+          schema: {type: string}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: {type: string, minLength: 1, maxLength: 2000}
+      responses:
+        '201': {$ref: '#/components/responses/Comment'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/reactions/like:
+    put:
+      summary: Idempotently like a post
+      operationId: likePost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Idempotently remove the current user's like
+      operationId: unlikePost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/comments/{comment_id}:
+    patch:
+      summary: Edit an owned comment at the expected version
+      operationId: updateComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/CommentID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content: {type: string, minLength: 1, maxLength: 2000}
+                body: {type: string, minLength: 1, maxLength: 2000}
+              anyOf: [{required: [content]}, {required: [body]}]
+      responses:
+        '200': {$ref: '#/components/responses/Comment'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Soft-delete an owned comment and maintain the post counter
+      operationId: deleteComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/CommentID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/comments/{comment_id}/reactions/like:
+    put:
+      summary: Idempotently like a visible comment
+      operationId: likeComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/CommentID'}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Idempotently remove the current user's comment like
+      operationId: unlikeComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/CommentID'}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+  /posts/{post_id}/repost:
+    put:
+      summary: Idempotently repost a post
+      operationId: repostPost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Post'}
+        '401': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/reposts:
+    put:
+      summary: Canonical plural alias for idempotent repost
+      operationId: repostPostCanonical
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Post'}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Canonical plural alias for undoing a repost
+      operationId: undoRepostCanonical
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+  /me:
+    get:
+      summary: Get the authenticated private profile
+      operationId: getMe
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Current user, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+    delete:
+      summary: Soft-deactivate the current local account and revoke its sessions
+      operationId: deactivateMe
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Account deactivated, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+  /me/account:
+    delete:
+      summary: Explicit alias for soft account deactivation
+      operationId: deactivateMyAccount
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Account deactivated, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+  /me/profile:
+    patch:
+      summary: Update allowlisted profile fields
+      operationId: updateMyProfile
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: {type: string, minLength: 1, maxLength: 50}
+                bio: {type: string, maxLength: 500}
+                avatar_url: {type: string, format: uri, maxLength: 500}
+              minProperties: 1
+      responses:
+        '200': {description: Updated private user, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /me/avatar:
+    put:
+      summary: Upload an image through the blob adapter and set it as the current avatar
+      operationId: uploadMyAvatar
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                alt_text: {type: string, maxLength: 500}
+      responses:
+        '201': {$ref: '#/components/responses/Media'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /uploads:
+    post:
+      summary: Upload post media to the local blob adapter
+      operationId: uploadPostMedia
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                alt_text: {type: string, maxLength: 500}
+      responses:
+        '201': {$ref: '#/components/responses/Media'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /media/{media_id}:
+    get:
+      summary: Stream owned, avatar, or viewer-visible post media
+      operationId: getMedia
+      parameters: [{$ref: '#/components/parameters/MediaID'}]
+      responses:
+        '200':
+          description: Stored media bytes
+          headers:
+            ETag: {schema: {type: string}}
+            X-Content-Type-Options: {schema: {type: string, const: nosniff}}
+          content:
+            image/jpeg: {schema: {type: string, format: binary}}
+            image/png: {schema: {type: string, format: binary}}
+            image/gif: {schema: {type: string, format: binary}}
+            image/webp: {schema: {type: string, format: binary}}
+            video/mp4: {schema: {type: string, format: binary}}
+        '404': {$ref: '#/components/responses/Error'}
+  /me/password:
+    put:
+      summary: Change the local password and revoke other sessions
+      operationId: changeMyPassword
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string}
+                new_password: {type: string, minLength: 8, maxLength: 128}
+      responses:
+        '200': {description: Password changed, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /categories:
+    get:
+      summary: List categories
+      operationId: listCategories
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/DataEnvelope'}
+  /tags:
+    get:
+      summary: List tags
+      operationId: listTags
+      responses:
+        '200':
+          description: Tags
+          content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}
+  /search:
+    get:
+      summary: Search viewer-visible posts, public user fields, and tags
+      operationId: search
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 2, maxLength: 100}}
+        - {name: type, in: query, schema: {type: string, enum: [all, posts, users, tags], default: all}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Grouped search results
+          content: {application/json: {schema: {$ref: '#/components/schemas/SearchEnvelope'}}}
+        '422': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/bookmark:
+    put:
+      summary: Idempotently bookmark a visible post
+      operationId: bookmarkPost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Idempotently remove the current user's bookmark
+      operationId: unbookmarkPost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+  /me/bookmarks:
+    get:
+      summary: List the current user's viewer-visible bookmarks
+      operationId: listMyBookmarks
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {$ref: '#/components/responses/PostList'}
+  /users/{user_id}/follow:
+    put:
+      summary: Idempotently follow an active user
+      operationId: followUser
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Idempotently unfollow a user
+      operationId: unfollowUser
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+  /notifications:
+    get:
+      summary: List durable notifications owned by the current user
+      operationId: listNotifications
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: unread, in: query, schema: {type: boolean, default: false}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Notification page
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationListEnvelope'}}}
+  /notifications/read:
+    put:
+      summary: Idempotently mark selected notifications, or all when ids is empty, read
+      operationId: markNotificationsRead
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: {type: array, maxItems: 100, items: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+  /conversations:
+    get:
+      summary: List the current user's active conversations, newest activity first
+      operationId: listConversations
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Cursor-paged conversations owned by the authenticated membership
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConversationListEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    post:
+      summary: Create or reuse the active conversation with exactly this member set
+      description: >-
+        The authenticated user is added as owner. A reversed or repeated member set
+        returns the existing active conversation with Idempotency-Replayed: true.
+      operationId: createConversation
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateConversation'}
+      responses:
+        '201': {$ref: '#/components/responses/Conversation'}
+        '200':
+          description: Existing active conversation for the same member set
+          headers:
+            Idempotency-Replayed: {schema: {type: string, const: 'true'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConversationEnvelope'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /conversations/{conversation_id}:
+    get:
+      summary: Get an active conversation visible to the current member
+      operationId: getConversation
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ConversationID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Conversation'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /conversations/{conversation_id}/messages:
+    get:
+      summary: List conversation messages newest first
+      description: The opaque cursor is scoped to the authenticated user and conversation.
+      operationId: listConversationMessages
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ConversationID'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Cursor-paged messages for a current member
+          content: {application/json: {schema: {$ref: '#/components/schemas/MessageListEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    post:
+      summary: Send an idempotent message to a conversation
+      description: >-
+        client_message_id is unique per sender. Reusing it with the same
+        conversation and body returns the original message; a different payload
+        returns a conflict.
+      operationId: sendConversationMessage
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ConversationID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateMessage'}
+      responses:
+        '201': {$ref: '#/components/responses/Message'}
+        '200':
+          description: Idempotent replay of the original message
+          headers:
+            Idempotency-Replayed: {schema: {type: string, const: 'true'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/MessageEnvelope'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /events:
+    get:
+      summary: Poll durable notification events after a reconnect cursor
+      description: >-
+        HTTP polling is the reconnect mechanism for this slice. Events are
+        returned oldest first after the supplied user-scoped cursor. This is not
+        a WebSocket or external push subscription.
+      operationId: listReconnectEvents
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Event page plus polling retry hint
+          content: {application/json: {schema: {$ref: '#/components/schemas/EventListEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /reports:
+    post:
+      summary: Submit an idempotent report for a visible target
+      operationId: submitReport
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_type, target_id, reason]
+              properties:
+                target_type: {type: string, enum: [post, comment, user]}
+                target_id: {type: string}
+                reason: {type: string, minLength: 5, maxLength: 1000}
+      responses:
+        '201': {description: Report created, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
+        '200': {description: Idempotent replay, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /admin/reports:
+    get:
+      summary: List the moderation report queue
+      operationId: listAdminReports
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [open, dismissed, actioned], default: open}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Reports; moderator or admin required
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReportListEnvelope'}}}
+        '403': {$ref: '#/components/responses/Error'}
+  /admin/reports/{report_id}/decision:
+    post:
+      summary: Decide a report and atomically write notifications plus audit
+      operationId: decideAdminReport
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ReportID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason]
+              properties:
+                decision: {type: string, enum: [dismiss, remove_content, suspend_user]}
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {description: Decided report, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /admin/content:
+    get:
+      summary: List posts and comments for moderation review
+      operationId: listAdminContent
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: type, in: query, schema: {type: string, enum: [all, post, comment], default: all}}
+        - {name: status, in: query, schema: {type: string, enum: [draft, published, deleted]}}
+        - {name: author_id, in: query, schema: {type: string}}
+        - {name: report_status, in: query, schema: {type: string, enum: [open, dismissed, actioned]}}
+        - {name: q, in: query, schema: {type: string, maxLength: 100}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Content review page; moderator or admin required
+          content: {application/json: {schema: {$ref: '#/components/schemas/ContentReviewListEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/users:
+    get:
+      summary: Search and filter users (admin only)
+      operationId: listAdminUsers
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: q, in: query, schema: {type: string, maxLength: 100}}
+        - {name: status, in: query, schema: {type: string, enum: [active, suspended]}}
+        - {name: role, in: query, schema: {type: string, enum: [member, moderator, admin]}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Cursor-paged private user records; admin required
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminUserListEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/users/{user_id}/status:
+    patch:
+      summary: Activate or suspend a user and atomically write an audit event
+      description: >-
+        Suspending a user revokes active sessions. An admin cannot suspend their
+        own account or the last active admin.
+      operationId: updateAdminUserStatus
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateUserStatus'}
+      responses:
+        '200':
+          description: Current user record plus whether the status changed
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminUserStatusEnvelope'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/categories:
+    post:
+      summary: Create a category and audit the mutation (admin only)
+      operationId: createAdminCategory
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateTaxonomy'}}}
+      responses:
+        '201': {description: Created category, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/categories/{category_id}:
+    patch:
+      summary: Update a category and audit the mutation (admin only)
+      operationId: updateAdminCategory
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/CategoryID'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateTaxonomy'}}}
+      responses:
+        '200': {description: Updated category, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Delete an unused category and audit the reason (admin only)
+      operationId: deleteAdminCategory
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/CategoryID'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/DeleteTaxonomy'}}}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/tags:
+    post:
+      summary: Create a tag and audit the mutation (admin only)
+      operationId: createAdminTag
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateTaxonomy'}}}
+      responses:
+        '201': {description: Created tag, content: {application/json: {schema: {$ref: '#/components/schemas/TagEnvelope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/tags/{tag_id}:
+    patch:
+      summary: Update a tag and audit the mutation (admin only)
+      operationId: updateAdminTag
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/TagID'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateTaxonomy'}}}
+      responses:
+        '200': {description: Updated tag, content: {application/json: {schema: {$ref: '#/components/schemas/TagEnvelope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Delete an unused tag and audit the reason (admin only)
+      operationId: deleteAdminTag
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/TagID'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/DeleteTaxonomy'}}}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /admin/audit-events:
+    get:
+      summary: List immutable audit events (admin only)
+      operationId: listAuditEvents
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200':
+          description: Audit event page
+          content: {application/json: {schema: {$ref: '#/components/schemas/AuditListEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /users/{user_id}:
+    get:
+      summary: Get an active public user profile visible to the viewer
+      operationId: getPublicUserProfile
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      responses:
+        '200': {description: Public profile and viewer-relative relation state, content: {application/json: {schema: {$ref: '#/components/schemas/PublicProfileEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /users/{user_id}/followers:
+    get:
+      summary: List visible followers of an active user
+      operationId: listUserFollowers
+      parameters: [{$ref: '#/components/parameters/UserID'}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Visible follower page, content: {application/json: {schema: {$ref: '#/components/schemas/PublicUserListEnvelope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /users/{user_id}/following:
+    get:
+      summary: List visible users followed by an active user
+      operationId: listUserFollowing
+      parameters: [{$ref: '#/components/parameters/UserID'}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Visible following page, content: {application/json: {schema: {$ref: '#/components/schemas/PublicUserListEnvelope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /users/{user_id}/block:
+    put:
+      summary: Idempotently block a user and remove follows in both directions
+      operationId: blockUser
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Idempotently remove the current user's block
+      operationId: unblockUser
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+  /me/blocks:
+    get:
+      summary: List users blocked by the current user
+      operationId: listMyBlocks
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Blocked-user page, content: {application/json: {schema: {$ref: '#/components/schemas/PublicUserListEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /categories/{category_id}/follow:
+    put:
+      summary: Idempotently follow a category
+      operationId: followCategory
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/CategoryID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      summary: Idempotently unfollow a category
+      operationId: unfollowCategory
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/CategoryID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+  /me/category-follows:
+    get:
+      summary: List categories followed by the current user
+      operationId: listMyCategoryFollows
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Category-follow page, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryFollowListEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /me/cover:
+    put:
+      summary: Upload and set the current user's public profile cover image
+      operationId: uploadMyCover
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                alt_text: {type: string, maxLength: 500}
+      responses:
+        '201': {$ref: '#/components/responses/Media'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /me/sessions:
+    get:
+      summary: List active refresh-capable device sessions
+      operationId: listMyDeviceSessions
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Active device sessions, content: {application/json: {schema: {$ref: '#/components/schemas/DeviceSessionListEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /me/sessions/{session_id}:
+    delete:
+      summary: Revoke one device session owned by the current user
+      operationId: revokeMyDeviceSession
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/SessionID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /conversations/{conversation_id}/read:
+    put:
+      summary: Monotonically advance the current member's read receipt
+      description: An empty message_id marks the current latest message. Older receipts never move the checkpoint backward.
+      operationId: markConversationRead
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ConversationID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {message_id: {type: string}}
+      responses:
+        '200': {description: Current receipt, content: {application/json: {schema: {$ref: '#/components/schemas/ConversationReceiptEnvelope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /conversations/{conversation_id}/membership:
+    delete:
+      summary: Leave a conversation without deleting its durable history
+      description: A leaver cannot read or send new messages and is never silently re-added by member-set reuse.
+      operationId: leaveConversation
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ConversationID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /homepage:
+    get:
+      summary: Get the published local homepage/carousel configuration
+      operationId: getHomepageConfig
+      responses:
+        '200': {description: Published homepage config with ETag version, content: {application/json: {schema: {$ref: '#/components/schemas/HomepageConfigEnvelope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /admin/homepage:
+    get:
+      summary: Get the homepage operations config including drafts (admin only)
+      operationId: getAdminHomepageConfig
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Current config with ETag version, content: {application/json: {schema: {$ref: '#/components/schemas/HomepageConfigEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    patch:
+      summary: Version-check and audit a homepage/carousel config replacement
+      operationId: updateAdminHomepageConfig
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateHomepageConfig'}}}
+      responses:
+        '200': {description: Updated config with incremented ETag version, content: {application/json: {schema: {$ref: '#/components/schemas/HomepageConfigEnvelope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /capabilities:
+    get:
+      summary: Inspect explicitly disabled integration capabilities
+      operationId: capabilities
+      responses:
+        '200':
+          description: Capability states
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DataEnvelope'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    PostID: {name: post_id, in: path, required: true, schema: {type: string}}
+    UserID: {name: user_id, in: path, required: true, schema: {type: string}}
+    ReportID: {name: report_id, in: path, required: true, schema: {type: string}}
+    CommentID: {name: comment_id, in: path, required: true, schema: {type: string}}
+    MediaID: {name: media_id, in: path, required: true, schema: {type: string}}
+    ConversationID: {name: conversation_id, in: path, required: true, schema: {type: string}}
+    CategoryID: {name: category_id, in: path, required: true, schema: {type: string}}
+    TagID: {name: tag_id, in: path, required: true, schema: {type: string}}
+    SessionID: {name: session_id, in: path, required: true, schema: {type: string}}
+    IfMatch: {name: If-Match, in: header, required: true, description: Quoted positive integer version returned as ETag., schema: {type: string}}
+    Cursor: {name: cursor, in: query, schema: {type: string}, description: Opaque cursor returned by page.next_cursor.}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 20}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: false, schema: {type: string, maxLength: 128}}
+  responses:
+    Session:
+      description: Authenticated device session
+      content: {application/json: {schema: {$ref: '#/components/schemas/SessionEnvelope'}}}
+    Post:
+      description: Post response
+      content: {application/json: {schema: {$ref: '#/components/schemas/PostEnvelope'}}}
+    PostList:
+      description: Cursor-paged posts
+      content: {application/json: {schema: {$ref: '#/components/schemas/PostListEnvelope'}}}
+    Comment:
+      description: Comment response
+      content: {application/json: {schema: {$ref: '#/components/schemas/CommentEnvelope'}}}
+    CommentList:
+      description: Cursor-paged comments
+      content: {application/json: {schema: {$ref: '#/components/schemas/CommentListEnvelope'}}}
+    Interaction:
+      description: Idempotent interaction state
+      content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}
+    Error:
+      description: Structured API error
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    Media:
+      description: Stored media metadata
+      content: {application/json: {schema: {$ref: '#/components/schemas/MediaEnvelope'}}}
+    Conversation:
+      description: Private conversation
+      content: {application/json: {schema: {$ref: '#/components/schemas/ConversationEnvelope'}}}
+    Message:
+      description: Private message
+      content: {application/json: {schema: {$ref: '#/components/schemas/MessageEnvelope'}}}
+  schemas:
+    Meta:
+      type: object
+      required: [request_id]
+      properties: {request_id: {type: string}}
+    Page:
+      type: object
+      required: [next_cursor]
+      properties: {next_cursor: {type: string}}
+    User:
+      type: object
+      required: [id, handle, name, display_name]
+      properties:
+        id: {type: string}
+        handle: {type: string}
+        email: {type: string, format: email}
+        name: {type: string}
+        display_name: {type: string}
+        avatar_url: {type: string}
+        bio: {type: string}
+        role: {type: string}
+        created_at: {type: string, format: date-time}
+    Author:
+      type: object
+      required: [id, handle, name, display_name, avatar_url]
+      properties:
+        id: {type: string}
+        handle: {type: string}
+        name: {type: string}
+        display_name: {type: string}
+        avatar_url: {type: string}
+    Post:
+      type: object
+      required: [id, kind, title, content, visibility, version, like_count, comment_count, repost_count, liked, reposted, author, created_at]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [article, image, video, repost]}
+        repost_of: {type: string}
+        title: {type: string}
+        summary: {type: string}
+        body: {type: string, description: Canonical detail field; omitted from feed items.}
+        content: {type: string, description: Vue-compatible content projection.}
+        status: {type: string}
+        visibility: {type: string, enum: [public, followers]}
+        version: {type: integer}
+        like_count: {type: integer}
+        comment_count: {type: integer}
+        repost_count: {type: integer}
+        likes: {type: integer}
+        comments: {type: integer}
+        reposts: {type: integer}
+        views: {type: integer}
+        liked: {type: boolean}
+        reposted: {type: boolean}
+        bookmarked: {type: boolean}
+        age: {type: string}
+        avatar: {type: string}
+        author: {$ref: '#/components/schemas/Author'}
+        category: {$ref: '#/components/schemas/Category'}
+        tags: {type: array, items: {$ref: '#/components/schemas/Tag'}}
+        media: {type: array, items: {$ref: '#/components/schemas/MediaAsset'}}
+        created_at: {type: string, format: date-time}
+        published_at: {type: string, format: date-time}
+    Comment:
+      type: object
+      required: [id, post_id, depth, body, content, author, created_at]
+      properties:
+        id: {type: string}
+        post_id: {type: string}
+        parent_id: {type: string}
+        root_id: {type: string}
+        depth: {type: integer, minimum: 0, maximum: 2}
+        body: {type: string}
+        content: {type: string}
+        like_count: {type: integer}
+        liked: {type: boolean}
+        version: {type: integer}
+        age: {type: string}
+        created_at: {type: string, format: date-time}
+        author: {$ref: '#/components/schemas/Author'}
+    CreatePost:
+      type: object
+      properties:
+        content: {type: string, minLength: 1, maxLength: 50000, description: Vue-compatible alias for body.}
+        body: {type: string, minLength: 1, maxLength: 50000}
+        title: {type: string, minLength: 3, maxLength: 120, description: Derived from content when omitted.}
+        summary: {type: string, maxLength: 500}
+        kind: {type: string, enum: [article, image, video], default: article}
+        category_id: {type: string}
+        tag_ids: {type: array, maxItems: 10, uniqueItems: true, items: {type: string}}
+        media_ids: {type: array, maxItems: 8, uniqueItems: true, items: {type: string}}
+        visibility: {type: string, enum: [public, followers], default: public}
+      anyOf: [{required: [content]}, {required: [body]}]
+    Session:
+      type: object
+      required: [session_id, access_token, refresh_token, token_type, expires_in, user]
+      properties:
+        session_id: {type: string}
+        access_token: {type: string}
+        refresh_token: {type: string}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer, const: 900}
+        user: {$ref: '#/components/schemas/User'}
+    DataEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {}
+        meta: {$ref: '#/components/schemas/Meta'}
+    SessionEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/Session'}, meta: {$ref: '#/components/schemas/Meta'}}
+    PostEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/Post'}, meta: {$ref: '#/components/schemas/Meta'}}
+    PostListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Post'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    CommentEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/Comment'}, meta: {$ref: '#/components/schemas/Meta'}}
+    CommentListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Comment'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    MediaAsset:
+      type: object
+      required: [id, purpose, mime_type, size_bytes, alt_text, url]
+      properties:
+        id: {type: string}
+        purpose: {type: string, enum: [post, avatar]}
+        mime_type: {type: string, enum: [image/jpeg, image/png, image/gif, image/webp, video/mp4]}
+        size_bytes: {type: integer, minimum: 1, maximum: 10485760}
+        checksum: {type: string}
+        original_name: {type: string}
+        alt_text: {type: string}
+        url: {type: string}
+        created_at: {type: string, format: date-time}
+    MediaEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {$ref: '#/components/schemas/MediaAsset'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    Category:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        post_count: {type: integer}
+    Tag:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        post_count: {type: integer}
+    PublicUser:
+      type: object
+      required: [id, handle, name, display_name, follower_count, following]
+      properties:
+        id: {type: string}
+        handle: {type: string}
+        name: {type: string}
+        display_name: {type: string}
+        avatar_url: {type: string}
+        bio: {type: string}
+        follower_count: {type: integer}
+        following: {type: boolean}
+    SearchEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data:
+          type: object
+          required: [posts, users, tags]
+          properties:
+            posts: {type: array, items: {$ref: '#/components/schemas/Post'}}
+            users: {type: array, items: {$ref: '#/components/schemas/PublicUser'}}
+            tags: {type: array, items: {$ref: '#/components/schemas/Tag'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    ConversationMember:
+      type: object
+      required: [user, role, joined_at]
+      properties:
+        user: {$ref: '#/components/schemas/Author'}
+        role: {type: string, enum: [owner, member]}
+        joined_at: {type: string, format: date-time}
+        read_at: {type: string, format: date-time}
+        left_at: {type: string, format: date-time}
+    Message:
+      type: object
+      required: [id, conversation_id, client_message_id, body, created_at, sender]
+      properties:
+        id: {type: string}
+        conversation_id: {type: string}
+        client_message_id: {type: string}
+        body: {type: string}
+        created_at: {type: string, format: date-time}
+        sender: {$ref: '#/components/schemas/Author'}
+    Conversation:
+      type: object
+      required: [id, title, status, created_at, updated_at, members]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        status: {type: string, enum: [active, closed]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        members: {type: array, items: {$ref: '#/components/schemas/ConversationMember'}}
+        last_message: {$ref: '#/components/schemas/Message'}
+        last_read_message_id: {type: string}
+    CreateConversation:
+      type: object
+      required: [member_ids]
+      properties:
+        member_ids:
+          type: array
+          minItems: 1
+          maxItems: 19
+          uniqueItems: true
+          description: Other active user IDs; must not contain the current user.
+          items: {type: string, minLength: 1}
+        title: {type: string, maxLength: 100}
+    CreateMessage:
+      type: object
+      required: [client_message_id, body]
+      properties:
+        client_message_id: {type: string, minLength: 1, maxLength: 128}
+        body: {type: string, minLength: 1, maxLength: 5000}
+    ConversationEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {$ref: '#/components/schemas/Conversation'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    ConversationListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Conversation'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    MessageEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {$ref: '#/components/schemas/Message'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    MessageListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Message'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    Notification:
+      type: object
+      required: [id, type, subject_type, subject_id, payload, created_at]
+      properties:
+        id: {type: string}
+        type: {type: string, enum: [comment, like, repost, follow, moderation, message]}
+        subject_type: {type: string}
+        subject_id: {type: string}
+        payload: {type: object, additionalProperties: true}
+        read_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        actor: {$ref: '#/components/schemas/Author'}
+    NotificationListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Notification'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    ReconnectEvent:
+      type: object
+      required: [cursor, type, notification]
+      properties:
+        cursor: {type: string, description: Opaque checkpoint for the next /events poll.}
+        type: {type: string, const: notification.created}
+        notification: {$ref: '#/components/schemas/Notification'}
+    EventPage:
+      type: object
+      required: [next_cursor, has_more]
+      properties:
+        next_cursor: {type: string}
+        has_more: {type: boolean}
+    PollReconnectHint:
+      type: object
+      required: [transport, retry_after_ms]
+      properties:
+        transport: {type: string, const: poll}
+        retry_after_ms: {type: integer, const: 1500}
+    EventListEnvelope:
+      type: object
+      required: [data, page, reconnect, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/ReconnectEvent'}}
+        page: {$ref: '#/components/schemas/EventPage'}
+        reconnect: {$ref: '#/components/schemas/PollReconnectHint'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    Report:
+      type: object
+      required: [id, reporter_id, target_type, target_id, reason, status, created_at]
+      properties:
+        id: {type: string}
+        reporter_id: {type: string}
+        target_type: {type: string, enum: [post, comment, user]}
+        target_id: {type: string}
+        reason: {type: string}
+        status: {type: string, enum: [open, dismissed, actioned]}
+        decision: {type: string}
+        decision_reason: {type: string}
+        decided_by: {type: string}
+        decided_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+    ReportEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/Report'}, meta: {$ref: '#/components/schemas/Meta'}}
+    ReportListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Report'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    AdminUser:
+      type: object
+      required: [id, handle, email, display_name, role, status, created_at]
+      properties:
+        id: {type: string}
+        handle: {type: string}
+        email: {type: string, format: email}
+        display_name: {type: string}
+        role: {type: string, enum: [member, moderator, admin]}
+        status: {type: string, enum: [active, suspended]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AdminUserListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/AdminUser'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    UpdateUserStatus:
+      type: object
+      required: [status, reason]
+      properties:
+        status: {type: string, enum: [active, suspended]}
+        reason: {type: string, minLength: 3, maxLength: 500}
+    AdminUserStatusResult:
+      type: object
+      required: [user, changed]
+      properties:
+        user: {$ref: '#/components/schemas/AdminUser'}
+        changed: {type: boolean}
+    AdminUserStatusEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {$ref: '#/components/schemas/AdminUserStatusResult'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    ContentReviewItem:
+      type: object
+      required: [type, id, author_id, status, body, open_reports, created_at]
+      properties:
+        type: {type: string, enum: [post, comment]}
+        id: {type: string}
+        author_id: {type: string}
+        status: {type: string, enum: [draft, published, deleted]}
+        title: {type: string}
+        body: {type: string}
+        visibility: {type: string, enum: [public, followers]}
+        open_reports: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+    ContentReviewListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/ContentReviewItem'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    CreateTaxonomy:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: {type: string, minLength: 2, maxLength: 50, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
+        name: {type: string, minLength: 1, maxLength: 50}
+    UpdateTaxonomy:
+      type: object
+      minProperties: 1
+      properties:
+        slug: {type: string, minLength: 2, maxLength: 50, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
+        name: {type: string, minLength: 1, maxLength: 50}
+    DeleteTaxonomy:
+      type: object
+      required: [reason]
+      properties:
+        reason: {type: string, minLength: 3, maxLength: 500}
+    CategoryEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {$ref: '#/components/schemas/Category'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    TagEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {$ref: '#/components/schemas/Tag'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    AuditEvent:
+      type: object
+      required: [id, actor_id, action, target_type, target_id, before, after, reason, request_id, created_at]
+      properties:
+        id: {type: string}
+        actor_id: {type: string}
+        action: {type: string}
+        target_type: {type: string}
+        target_id: {type: string}
+        before: {type: object, additionalProperties: true}
+        after: {type: object, additionalProperties: true}
+        reason: {type: string}
+        request_id: {type: string}
+        created_at: {type: string, format: date-time}
+    AuditListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    PublicProfile:
+      type: object
+      required: [id, handle, name, display_name, avatar_url, cover_url, bio, follower_count, following_count, post_count, following, follows_you, blocked_by_me]
+      properties:
+        id: {type: string}
+        handle: {type: string}
+        name: {type: string}
+        display_name: {type: string}
+        avatar_url: {type: string}
+        cover_url: {type: string}
+        bio: {type: string}
+        follower_count: {type: integer, minimum: 0}
+        following_count: {type: integer, minimum: 0}
+        post_count: {type: integer, minimum: 0, description: Count of posts visible to this viewer.}
+        following: {type: boolean}
+        follows_you: {type: boolean}
+        blocked_by_me: {type: boolean}
+    PublicProfileEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/PublicProfile'}, meta: {$ref: '#/components/schemas/Meta'}}
+    PublicUserListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/PublicUser'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    CategoryFollow:
+      type: object
+      required: [category, followed_at]
+      properties:
+        category: {$ref: '#/components/schemas/Category'}
+        followed_at: {type: string, format: date-time}
+    CategoryFollowListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/CategoryFollow'}}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    DeviceSession:
+      type: object
+      required: [id, current, access_expires_at, refresh_expires_at, created_at]
+      properties:
+        id: {type: string}
+        current: {type: boolean}
+        access_expires_at: {type: string, format: date-time}
+        refresh_expires_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+    DeviceSessionListEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/DeviceSession'}}
+        meta: {$ref: '#/components/schemas/Meta'}
+    ConversationReceipt:
+      type: object
+      required: [conversation_id, changed]
+      properties:
+        conversation_id: {type: string}
+        last_read_message_id: {type: string}
+        read_at: {type: string, format: date-time}
+        changed: {type: boolean}
+    ConversationReceiptEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/ConversationReceipt'}, meta: {$ref: '#/components/schemas/Meta'}}
+    CarouselItem:
+      type: object
+      required: [id, title, position, enabled]
+      properties:
+        id: {type: string}
+        title: {type: string, minLength: 1, maxLength: 100}
+        summary: {type: string, maxLength: 300}
+        link_url: {type: string, maxLength: 500}
+        media_id: {type: string}
+        media_url: {type: string, readOnly: true}
+        position: {type: integer, minimum: 0, readOnly: true}
+        enabled: {type: boolean}
+    Announcement:
+      type: object
+      required: [id, text, enabled]
+      properties:
+        id: {type: string}
+        text: {type: string, minLength: 1, maxLength: 300}
+        link_url: {type: string, maxLength: 500}
+        enabled: {type: boolean}
+    HomepagePayload:
+      type: object
+      required: [carousel, announcements]
+      properties:
+        carousel: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/CarouselItem'}}
+        announcements: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/Announcement'}}
+    HomepageConfig:
+      type: object
+      required: [id, version, status, payload, updated_at]
+      properties:
+        id: {type: string, const: homepage}
+        version: {type: integer, minimum: 1}
+        status: {type: string, enum: [draft, published]}
+        payload: {$ref: '#/components/schemas/HomepagePayload'}
+        updated_at: {type: string, format: date-time}
+    HomepageConfigEnvelope:
+      type: object
+      required: [data, meta]
+      properties: {data: {$ref: '#/components/schemas/HomepageConfig'}, meta: {$ref: '#/components/schemas/Meta'}}
+    UpdateHomepageConfig:
+      type: object
+      required: [status, carousel, announcements]
+      properties:
+        status: {type: string, enum: [draft, published]}
+        carousel: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/CarouselItem'}}
+        announcements: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/Announcement'}}
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            field_errors: {type: object, additionalProperties: {type: array, items: {type: string}}}
+            request_id: {type: string}
+            retry_after: {type: integer}

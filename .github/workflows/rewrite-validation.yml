@@ -1,0 +1,41 @@
+name: Rewrite validation
+
+on:
+  push:
+    branches: [ci/rewrite-validation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fanbbsapi-rewrite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - name: Format check
+        run: test -z "$(gofmt -l cmd internal migrations)"
+      - name: Vet
+        run: go vet ./...
+      - name: Tests and migration/import rehearsals
+        run: go test -count=1 ./...
+      - name: Validate OpenAPI graph
+        run: |
+          python3 -m pip install --disable-pip-version-check pyyaml==6.0.3
+          python3 scripts/validate_openapi.py api/openapi.yaml
+      - name: Local API smoke
+        run: |
+          FANBBS_DB="$RUNNER_TEMP/fanbbs.db" FANBBS_BLOB_DIR="$RUNNER_TEMP/blobs" FANBBS_ADDR=127.0.0.1:18080 go run ./cmd/api >"$RUNNER_TEMP/fanbbs.log" 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for n in $(seq 1 40); do curl -fsS http://127.0.0.1:18080/healthz && break; sleep .25; done
+          curl -fsS http://127.0.0.1:18080/api/v1/posts?feed=recommend\&limit=2 > /dev/null
