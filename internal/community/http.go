@@ -20,6 +20,8 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 	router.Get("/search", s.searchHTTP)
 	router.Get("/homepage", s.homepageHTTP)
 	router.Get("/users/{userID}", s.publicProfileHTTP)
+	router.Get("/users/{userID}/posts", s.publicProfilePostsHTTP)
+	router.Get("/users/{userID}/comments", s.publicProfileCommentsHTTP)
 	router.Get("/users/{userID}/followers", s.socialUsersHTTP("followers"))
 	router.Get("/users/{userID}/following", s.socialUsersHTTP("following"))
 	router.Get("/media/{mediaID}", s.mediaHTTP)

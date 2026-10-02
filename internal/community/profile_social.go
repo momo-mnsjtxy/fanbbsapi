@@ -71,6 +71,87 @@ func (s *Service) PublicProfile(ctx context.Context, targetID, viewerID string) 
 	return item, nil
 }
 
+// PublicProfilePosts is deliberately viewer-aware. In particular, a
+// followers-only post appears here only when the current viewer follows the
+// profile; keeping this on visiblePostPredicate prevents profile pages from
+// becoming a privacy bypass around the main feed.
+func (s *Service) PublicProfilePosts(ctx context.Context, targetID, viewerID string, offset, limit int) ([]Post, string, error) {
+	if _, err := s.PublicProfile(ctx, targetID, viewerID); err != nil {
+		return nil, "", err
+	}
+	args := []any{viewerID, viewerID, viewerID, targetID}
+	args = append(args, visiblePostArgs(viewerID)...)
+	args = append(args, limit+1, offset)
+	rows, err := s.db.QueryContext(ctx, postSelect+`
+		WHERE p.author_id = ? AND `+visiblePostPredicate+`
+		ORDER BY p.published_at DESC, p.id DESC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("list public profile posts: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Post, 0, limit+1)
+	for rows.Next() {
+		item, err := scanPost(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("scan public profile post: %w", err)
+		}
+		item.Body = ""
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(items) > limit {
+		items = items[:limit]
+		next = platform.EncodeCursor(offset + limit)
+	}
+	return items, next, nil
+}
+
+// PublicProfileComments returns only comments whose parent post is visible to
+// the viewer. It never exposes deleted comments or comments on hidden posts.
+func (s *Service) PublicProfileComments(ctx context.Context, targetID, viewerID string, offset, limit int) ([]Comment, string, error) {
+	if _, err := s.PublicProfile(ctx, targetID, viewerID); err != nil {
+		return nil, "", err
+	}
+	args := []any{viewerID, targetID}
+	args = append(args, visiblePostArgs(viewerID)...)
+	args = append(args, limit+1, offset)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.post_id, COALESCE(c.parent_id, ''), COALESCE(c.root_id, ''), c.depth,
+		       c.body, c.like_count, c.version, c.created_at, u.id, u.handle, u.display_name, u.avatar_url,
+		       EXISTS(SELECT 1 FROM comment_reactions reaction WHERE reaction.comment_id = c.id AND reaction.user_id = ?)
+		FROM comments c JOIN users u ON u.id = c.author_id JOIN posts p ON p.id = c.post_id
+		WHERE c.author_id = ? AND c.status = 'published' AND `+visiblePostPredicate+`
+		ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("list public profile comments: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Comment, 0, limit+1)
+	for rows.Next() {
+		var item Comment
+		var liked bool
+		if err := rows.Scan(&item.ID, &item.PostID, &item.ParentID, &item.RootID, &item.Depth,
+			&item.Body, &item.LikeCount, &item.Version, &item.CreatedAt, &item.Author.ID, &item.Author.Handle,
+			&item.Author.DisplayName, &item.Author.AvatarURL, &liked); err != nil {
+			return nil, "", fmt.Errorf("scan public profile comment: %w", err)
+		}
+		item.Liked = liked
+		items = append(items, shapeComment(item))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(items) > limit {
+		items = items[:limit]
+		next = platform.EncodeCursor(offset + limit)
+	}
+	return items, next, nil
+}
+
 func (s *Service) SocialUsers(ctx context.Context, targetID, viewerID, relation string, offset, limit int) ([]PublicUser, string, error) {
 	if _, err := s.PublicProfile(ctx, targetID, viewerID); err != nil {
 		return nil, "", err
@@ -242,6 +323,36 @@ func (s *Service) publicProfileHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	platform.WriteData(w, r, http.StatusOK, item)
+}
+
+func (s *Service) publicProfilePostsHTTP(w http.ResponseWriter, r *http.Request) {
+	offset, limit, err := pagination(r)
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	viewer, _ := identity.UserFromContext(r.Context())
+	items, next, err := s.PublicProfilePosts(r.Context(), userID(r), viewer.ID, offset, limit)
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	platform.WriteList(w, r, items, next)
+}
+
+func (s *Service) publicProfileCommentsHTTP(w http.ResponseWriter, r *http.Request) {
+	offset, limit, err := pagination(r)
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	viewer, _ := identity.UserFromContext(r.Context())
+	items, next, err := s.PublicProfileComments(r.Context(), userID(r), viewer.ID, offset, limit)
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	platform.WriteList(w, r, items, next)
 }
 
 func (s *Service) socialUsersHTTP(relation string) http.HandlerFunc {

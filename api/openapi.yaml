@@ -1018,6 +1018,25 @@ paths:
         '200': {description: Public profile and viewer-relative relation state, content: {application/json: {schema: {$ref: '#/components/schemas/PublicProfileEnvelope'}}}}
         '401': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+  /users/{user_id}/posts:
+    get:
+      summary: List posts by a user that are visible to the current viewer
+      description: Public posts are always eligible; followers-only posts require the current viewer to follow the author. Block relationships hide the profile and its content.
+      operationId: listPublicUserPosts
+      parameters: [{$ref: '#/components/parameters/UserID'}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {$ref: '#/components/responses/PostList'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /users/{user_id}/comments:
+    get:
+      summary: List a user's comments whose parent posts are visible to the current viewer
+      operationId: listPublicUserComments
+      parameters: [{$ref: '#/components/parameters/UserID'}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {$ref: '#/components/responses/CommentList'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /users/{user_id}/followers:
     get:
       summary: List visible followers of an active user

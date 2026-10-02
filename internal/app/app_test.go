@@ -254,6 +254,18 @@ func TestFollowerOnlyVisibilityIsEnforcedEverywhere(t *testing.T) {
 	}, nil), http.StatusCreated)
 	postID := created["data"].(map[string]any)["id"].(string)
 
+	followerProfilePosts := expectStatus(t, api.request(http.MethodGet, "/api/v1/users/usr_rain/posts", followerAccess, nil, nil), http.StatusOK)
+	strangerProfilePosts := expectStatus(t, api.request(http.MethodGet, "/api/v1/users/usr_rain/posts", strangerAccess, nil, nil), http.StatusOK)
+	if len(followerProfilePosts["data"].([]any)) != 2 || len(strangerProfilePosts["data"].([]any)) != 1 {
+		t.Fatalf("profile post visibility mismatch: follower=%#v stranger=%#v", followerProfilePosts, strangerProfilePosts)
+	}
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/posts/"+postID+"/comments", followerAccess, map[string]any{"content": "关注者可见评论"}, nil), http.StatusCreated)
+	followerProfileComments := expectStatus(t, api.request(http.MethodGet, "/api/v1/users/usr_demo/comments", followerAccess, nil, nil), http.StatusOK)
+	strangerProfileComments := expectStatus(t, api.request(http.MethodGet, "/api/v1/users/usr_demo/comments", strangerAccess, nil, nil), http.StatusOK)
+	if len(followerProfileComments["data"].([]any)) != 1 || len(strangerProfileComments["data"].([]any)) != 0 {
+		t.Fatalf("profile comment visibility mismatch: follower=%#v stranger=%#v", followerProfileComments, strangerProfileComments)
+	}
+
 	expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+postID, followerAccess, nil, nil), http.StatusOK)
 	expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+postID, strangerAccess, nil, nil), http.StatusNotFound)
 	expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+postID, "", nil, nil), http.StatusNotFound)
