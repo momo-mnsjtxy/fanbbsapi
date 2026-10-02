@@ -84,14 +84,14 @@ func (s *Service) Follow(ctx context.Context, followerID, followedID string) (bo
 	} else if err != nil {
 		return false, 0, fmt.Errorf("check followed user: %w", err)
 	}
-	var blocked int
+	var blocked bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM blocks
 		WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?))`,
 		followerID, followedID, followedID, followerID).Scan(&blocked); err != nil {
 		return false, 0, fmt.Errorf("check follow block: %w", err)
 	}
-	if blocked != 0 {
+	if blocked {
 		return false, 0, platform.Problem(http.StatusConflict, "relationship_blocked", "屏蔽关系下不能关注")
 	}
 	now := s.now().UTC()

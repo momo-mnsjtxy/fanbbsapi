@@ -1,5 +1,5 @@
-// Package migrations owns the ordered SQLite schema. Embedding the files makes
-// local binaries independent of their current working directory.
+// Package migrations owns the ordered SQLite and PostgreSQL schemas. Embedding
+// the files makes binaries independent of their current working directory.
 package migrations
 
 import "embed"
@@ -8,3 +8,10 @@ import "embed"
 //
 //go:embed *.sql
 var Files embed.FS
+
+// PostgresFiles contains the PostgreSQL migration stream. It intentionally
+// mirrors the SQLite version names so deployment rehearsals can prove that both
+// adapters reached the same logical schema version.
+//
+//go:embed postgres/*.sql
+var PostgresFiles embed.FS

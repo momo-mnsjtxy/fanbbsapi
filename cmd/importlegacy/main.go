@@ -17,6 +17,8 @@ import (
 func main() {
 	inputPath := flag.String("input", "", "synthetic legacy JSON fixture")
 	databasePath := flag.String("db", "legacy-import.db", "local SQLite target")
+	adapter := flag.String("driver", "sqlite", "target adapter: sqlite or postgres")
+	databaseURL := flag.String("database-url", "", "PostgreSQL target URL (required with --driver postgres)")
 	synthetic := flag.Bool("synthetic", false, "required acknowledgement that this is generated test data")
 	flag.Parse()
 	if !*synthetic || *inputPath == "" {
@@ -36,7 +38,11 @@ func main() {
 	if document.Source != "synthetic" {
 		log.Fatal("refusing import: document source is not synthetic")
 	}
-	db, err := platform.OpenSQLite(context.Background(), *databasePath)
+	target := *databasePath
+	if *databaseURL != "" {
+		target = *databaseURL
+	}
+	db, err := platform.OpenDatabase(context.Background(), *adapter, target)
 	if err != nil {
 		log.Fatal(err)
 	}

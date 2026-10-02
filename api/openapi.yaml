@@ -13,8 +13,9 @@ info:
     storage are also not enabled. Local orders contain no prices or payment
     state; local community points cannot be purchased, transferred, redeemed,
     or spent. Media uses the bounded
-    local-filesystem development adapter, and SQLite is for local development
-    only rather than the approved production PostgreSQL target.
+    local-filesystem development adapter. SQLite remains the local-development
+    default; the production database adapter uses pgx and PostgreSQL 17 with a
+    separately versioned, rehearsed migration stream.
 servers:
   - url: http://localhost:8080/api/v1
 security: []

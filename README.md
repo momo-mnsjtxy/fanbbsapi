@@ -20,11 +20,11 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 - UTC daily check-in, immutable award-only local points, admin-verified task rewards, threshold-derived levels/titles/ranks, and avatar-frame catalog/entitlement/selection with duplicate-award guards
 - Member reports, explicit pending-to-published/rejected post review, audited moderator/admin pin/recommend controls, filtered content review, admin user status controls with session revocation, audited category/tag CRUD, role checks, and immutable audit events
 - Privacy-safe owner activity history, bounded local rate limits for login and write-heavy endpoints, security response headers, structured request logs, and process-local `/metrics`
-- SQLite foreign keys, embedded forward migrations, local demo seed, request IDs, validation and consistent error envelopes
+- SQLite foreign keys and local demo seed, plus a pgx/PostgreSQL 17 production adapter with embedded checksummed migrations, request IDs, validation and consistent error envelopes
 - OpenAPI contract at `api/openapi.yaml`
 - Explicit disabled boundaries for SMS, payment, cash wallet, withdrawal, lottery, paid-content purchase and external fulfillment integrations
 
-SQLite is explicitly the local-development adapter. The approved production target remains PostgreSQL with profiled legacy-data migration and production concurrency testing. This slice is not a production migration or a claim that the remaining original features are complete.
+SQLite remains the local-development adapter. PostgreSQL 17 is the production database adapter for the core identity/feed/post/comment path; it uses pgx stdlib, connection pooling, UTC sessions, serialized checksummed migrations, and the same domain transactions through dialect-safe binding. Real legacy-data profiling and production concurrency/operations acceptance remain separate gates.
 
 ## Run
 
@@ -44,12 +44,24 @@ Configuration:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `FANBBS_DATABASE_DRIVER` | `sqlite` | `sqlite` for local development or `postgres` for the production adapter |
+| `FANBBS_DATABASE_URL` | value of `FANBBS_DB` | PostgreSQL URL when the production adapter is selected |
 | `FANBBS_ADDR` | `:8080` | HTTP listen address |
 | `FANBBS_DB` | `fanbbs.db` | SQLite database path |
-| `FANBBS_SEED_DEMO` | `true` | Seed local demo users/content when the user table is empty |
+| `FANBBS_SEED_DEMO` | SQLite: `true`; PostgreSQL: `false` | Seed local demo users/content when the user table is empty |
 | `FANBBS_BLOB_DIR` | `data/blobs` | Local-development blob directory |
 
 The optional seed contains local test identities used by the integration suite. They are development fixtures only. Set `FANBBS_SEED_DEMO=false` outside local development; production guidance never relies on seeded credentials.
+
+PostgreSQL startup and the migration-only command use the same adapter:
+
+```sh
+FANBBS_DATABASE_DRIVER=postgres \
+FANBBS_DATABASE_URL='postgres://fanbbs:password@db.example/fanbbs?sslmode=verify-full' \
+go run ./cmd/migrate -driver postgres
+```
+
+PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `007`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
 
 ## Verify
 
@@ -59,7 +71,7 @@ find cmd internal migrations -name '*.go' -print0 | xargs -0 /tmp/go1.26.5/bin/g
 /tmp/go1.26.5/bin/go vet ./...
 ```
 
-The integration suite uses a real temporary SQLite database. It covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
+The integration suite uses a real temporary SQLite database and CI PostgreSQL 17 service. The PostgreSQL rehearsal covers all seven migrations and idempotent reapplication, registration/login/authentication, follower visibility and feed reads, idempotent post/comment writes, reactions, optimistic edits, deterministic synthetic import reconciliation/quarantine/replay, and trigger-forced import rollback. The broader SQLite suite covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
 
 It also covers upload MIME/ownership/visibility and public/private cache policy, avatar/cover references, device-session ownership/revocation, public-profile and block visibility, category follows/feed filters, monotonic read receipts and safe conversation leave, homepage version/audit rollback, stale post/comment writes, comment reactions, moderated counter/repost cleanup, and deterministic synthetic legacy import with quarantine/count reconciliation.
 
@@ -67,7 +79,7 @@ The commerce/gamification integration cases cover admin RBAC, public catalog rea
 
 ## Synthetic migration rehearsal
 
-`cmd/importlegacy` has no network or MySQL capability. It refuses to open the target database until both `--synthetic` is passed and the JSON document declares `"source":"synthetic"` with `mapping_version: 1`.
+`cmd/importlegacy` has no network or MySQL capability. It refuses to open the target database until both `--synthetic` is passed and the JSON document declares `"source":"synthetic"` with `mapping_version: 1`. It accepts either `--driver sqlite --db ...` or `--driver postgres --database-url ...`.
 
 ```sh
 /tmp/go1.26.5/bin/go run ./cmd/importlegacy \
@@ -113,8 +125,8 @@ internal/commerce       local non-payment catalog, bounded inventory, carts,
 internal/capabilities   disabled external/regulated interfaces
 internal/blob           blob interface and bounded local-filesystem adapter
 internal/legacyimport   synthetic-only deterministic mapper and quarantine report
-internal/platform       HTTP envelope, IDs and SQLite bootstrap
-migrations              embedded schema source of truth
+internal/platform       HTTP envelope, IDs, SQLite and pgx/PostgreSQL bootstrap
+migrations              embedded SQLite and PostgreSQL schema sources of truth
 api/openapi.yaml        public API contract
 docs/remaining-features.md
 ```

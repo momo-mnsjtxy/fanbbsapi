@@ -370,7 +370,7 @@ func (s *Service) AwardTask(ctx context.Context, actor identity.User, requestID,
 		return Task{}, false, err
 	}
 	if task.RewardFrameID != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO user_avatar_frames(user_id,frame_id,source_type,source_id,granted_at) VALUES(?,?,'task_reward',?,?)`, userID, task.RewardFrameID, claimID, stamp); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO user_avatar_frames(user_id,frame_id,source_type,source_id,granted_at) VALUES(?,?,'task_reward',?,?) ON CONFLICT DO NOTHING`, userID, task.RewardFrameID, claimID, stamp); err != nil {
 			return Task{}, false, err
 		}
 	}
@@ -536,7 +536,7 @@ func (s *Service) GrantFrame(ctx context.Context, actor identity.User, requestID
 	if err != nil {
 		return AvatarFrame{}, false, err
 	}
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO user_avatar_frames(user_id,frame_id,source_type,source_id,granted_at) VALUES(?,?,'admin_grant',?,?)`, userID, frameID, requestID, stamp)
+	result, err := tx.ExecContext(ctx, `INSERT INTO user_avatar_frames(user_id,frame_id,source_type,source_id,granted_at) VALUES(?,?,'admin_grant',?,?) ON CONFLICT DO NOTHING`, userID, frameID, requestID, stamp)
 	if err != nil {
 		return AvatarFrame{}, false, err
 	}

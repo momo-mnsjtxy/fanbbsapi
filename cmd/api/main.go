@@ -18,8 +18,9 @@ import (
 
 func main() {
 	ctx := context.Background()
-	databasePath := env("FANBBS_DB", "fanbbs.db")
-	db, err := platform.OpenSQLite(ctx, databasePath)
+	adapter := env("FANBBS_DATABASE_DRIVER", "sqlite")
+	databaseTarget := env("FANBBS_DATABASE_URL", env("FANBBS_DB", "fanbbs.db"))
+	db, err := platform.OpenDatabase(ctx, adapter, databaseTarget)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -30,7 +31,11 @@ func main() {
 		log.Fatal(err)
 	}
 	application := app.NewWithBlob(db, localBlobs)
-	if env("FANBBS_SEED_DEMO", "true") == "true" {
+	seedDefault := "false"
+	if adapter == "sqlite" || adapter == "sqlite3" {
+		seedDefault = "true"
+	}
+	if env("FANBBS_SEED_DEMO", seedDefault) == "true" {
 		if err := application.Identity.SeedDemo(ctx); err != nil {
 			log.Fatal(err)
 		}

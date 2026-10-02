@@ -16,6 +16,20 @@ jobs:
   go-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: fanbbs_test
+          POSTGRES_USER: fanbbs
+          POSTGRES_PASSWORD: fanbbs_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U fanbbs -d fanbbs_test"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -32,6 +46,10 @@ jobs:
           govulncheck ./...
       - name: Tests and migration/import rehearsals
         run: go test -count=1 ./...
+      - name: PostgreSQL 17 adapter and migration rehearsal
+        env:
+          FANBBS_TEST_POSTGRES_DSN: postgres://fanbbs:fanbbs_test_password@127.0.0.1:5432/fanbbs_test?sslmode=disable
+        run: go test -count=1 -run TestPostgresAdapterAndSyntheticMigrationRehearsal -v ./internal/platform
       - name: Validate OpenAPI graph
         run: |
           python3 -m pip install --disable-pip-version-check pyyaml==6.0.3

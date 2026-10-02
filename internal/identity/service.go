@@ -479,7 +479,7 @@ func checkPassword(password, encoded string) bool {
 func (s *Service) SeedDemo(ctx context.Context) error {
 	now := s.now().UTC()
 	for _, tag := range [][]string{{"tag_city", "city", "城市"}, {"tag_go", "go", "Go"}, {"tag_weekend", "weekend", "周末"}} {
-		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO tags(id, slug, name, created_at) VALUES (?, ?, ?, ?)`, tag[0], tag[1], tag[2], now.Format(time.RFC3339Nano)); err != nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO tags(id, slug, name, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, tag[0], tag[1], tag[2], now.Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("seed tag: %w", err)
 		}
 	}

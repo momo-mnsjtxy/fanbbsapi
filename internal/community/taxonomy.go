@@ -149,12 +149,12 @@ func (s *Service) searchUsers(ctx context.Context, pattern, viewerID string, off
 	users := make([]PublicUser, 0, limit+1)
 	for rows.Next() {
 		var user PublicUser
-		var following int
+		var following bool
 		if err := rows.Scan(&user.ID, &user.Handle, &user.DisplayName, &user.AvatarURL, &user.Bio, &user.FollowerCount, &following); err != nil {
 			return nil, false, fmt.Errorf("scan searched user: %w", err)
 		}
 		user.Name = user.DisplayName
-		user.Following = following != 0
+		user.Following = following
 		users = append(users, user)
 	}
 	more := len(users) > limit

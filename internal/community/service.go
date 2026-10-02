@@ -361,7 +361,8 @@ type scanner interface {
 func scanPost(row scanner) (Post, error) {
 	var post Post
 	var category Category
-	var liked, reposted, bookmarked, pinned, recommended int
+	var liked, reposted, bookmarked bool
+	var pinned, recommended int
 	var tagData, mediaData string
 	err := row.Scan(&post.ID, &post.Kind, &post.RepostOf, &post.Title, &post.Summary, &post.Body,
 		&post.Status, &post.Visibility, &post.Version, &pinned, &recommended, &post.LikeCount, &post.CommentCount,
@@ -393,11 +394,11 @@ func scanPost(row scanner) (Post, error) {
 			}
 		}
 	}
-	post.Liked = liked != 0
+	post.Liked = liked
 	post.Pinned = pinned != 0
 	post.Recommended = recommended != 0
-	post.Reposted = reposted != 0
-	post.Bookmarked = bookmarked != 0
+	post.Reposted = reposted
+	post.Bookmarked = bookmarked
 	post.Author.Name = post.Author.DisplayName
 	post.Content = post.Body
 	post.Likes = post.LikeCount
@@ -429,13 +430,13 @@ func (s *Service) ListComments(ctx context.Context, postID, viewerID string, off
 	comments := make([]Comment, 0, limit+1)
 	for rows.Next() {
 		var comment Comment
-		var liked int
+		var liked bool
 		if err := rows.Scan(&comment.ID, &comment.PostID, &comment.ParentID, &comment.RootID, &comment.Depth,
 			&comment.Body, &comment.LikeCount, &comment.Version, &comment.CreatedAt, &comment.Author.ID, &comment.Author.Handle,
 			&comment.Author.DisplayName, &comment.Author.AvatarURL, &liked); err != nil {
 			return nil, "", fmt.Errorf("scan comment: %w", err)
 		}
-		comment.Liked = liked != 0
+		comment.Liked = liked
 		comments = append(comments, comment)
 		comments[len(comments)-1] = shapeComment(comment)
 	}

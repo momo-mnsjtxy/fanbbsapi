@@ -171,24 +171,24 @@ func (s *Service) CreateConversation(ctx context.Context, creatorID string, inpu
 	}
 	for left := 0; left < len(memberList); left++ {
 		for right := left + 1; right < len(memberList); right++ {
-			var blocked int
+			var blocked bool
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?))`,
 				memberList[left], memberList[right], memberList[right], memberList[left]).Scan(&blocked); err != nil {
 				return Conversation{}, false, fmt.Errorf("check conversation block: %w", err)
 			}
-			if blocked != 0 {
+			if blocked {
 				return Conversation{}, false, platform.Problem(http.StatusConflict, "relationship_blocked", "屏蔽关系下不能创建会话")
 			}
 		}
 	}
 	memberKey := conversationMemberKey(members)
 	var existingID, existingStatus string
-	var hasLeftMembers int
+	var hasLeftMembers bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT c.id, c.status, EXISTS(SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.left_at IS NOT NULL)
 		FROM conversations c WHERE c.member_key = ?`, memberKey).Scan(&existingID, &existingStatus, &hasLeftMembers)
 	if err == nil {
-		if existingStatus != "active" || hasLeftMembers != 0 {
+		if existingStatus != "active" || hasLeftMembers {
 			return Conversation{}, false, platform.Problem(http.StatusConflict, "conversation_membership_closed", "该成员组合已有成员退出，不能静默重新加入")
 		}
 		_ = tx.Rollback()
@@ -203,7 +203,7 @@ func (s *Service) CreateConversation(ctx context.Context, creatorID string, inpu
 		return Conversation{}, false, err
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO conversations(id, created_by, member_key, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, conversationID, creatorID, memberKey, input.Title, now, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO conversations(id, created_by, member_key, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, conversationID, creatorID, memberKey, input.Title, now, now)
 	if err != nil {
 		return Conversation{}, false, fmt.Errorf("create conversation: %w", err)
 	}
@@ -382,7 +382,8 @@ func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, cli
 	} else if err != nil {
 		return Message{}, false, fmt.Errorf("authorize message: %w", err)
 	}
-	var activeMembers, blocked int
+	var activeMembers int
+	var blocked bool
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND left_at IS NULL`, conversationID).Scan(&activeMembers); err != nil {
 		return Message{}, false, fmt.Errorf("count active conversation members: %w", err)
 	}
@@ -397,7 +398,7 @@ func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, cli
 		)`, senderID, senderID, conversationID, senderID).Scan(&blocked); err != nil {
 		return Message{}, false, fmt.Errorf("check message block: %w", err)
 	}
-	if blocked != 0 {
+	if blocked {
 		return Message{}, false, platform.Problem(http.StatusConflict, "relationship_blocked", "屏蔽关系下不能发送消息")
 	}
 	messageID, err := platform.NewID("msg")
@@ -405,7 +406,7 @@ func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, cli
 		return Message{}, false, err
 	}
 	now := s.now().UTC()
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO messages(id, conversation_id, sender_id, client_message_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO messages(id, conversation_id, sender_id, client_message_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 		messageID, conversationID, senderID, clientMessageID, body, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Message{}, false, fmt.Errorf("create message: %w", err)

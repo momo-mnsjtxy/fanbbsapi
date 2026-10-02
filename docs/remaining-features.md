@@ -26,10 +26,10 @@ This matrix is grounded in the original Java source under `backend/fanbbsapi-dev
 
 ## Production gates for this slice
 
-- Replace SQLite with the approved PostgreSQL/sqlc repository implementation after real schema and volume discovery
+- Validate production query plans and concurrency beyond the implemented pgx/PostgreSQL 17 core adapter after real schema and volume discovery
 - Replace process-local rate limits and metrics with approved production edge/telemetry, add traces and secrets management
 - Profile and import the real legacy schema; verify row counts, relations, unknown enums and legacy password hashes
 - Replace the synthetic-only importer with an separately approved, read-only real snapshot adapter after profiling; reuse its deterministic mapping/quarantine/count invariants
 - Define moderation, privacy/retention, minors and content policies
-- Add load/concurrency, migration rehearsal, backup/restore and rollback tests
+- Add load/concurrency plus backup/restore drills; PostgreSQL schema, synthetic import, quarantine and transaction rollback rehearsals now run in CI
 - Configure CORS/CSRF according to the final same-origin or cookie deployment model; this slice returns bearer tokens in JSON and never stores refresh tokens in the frontend

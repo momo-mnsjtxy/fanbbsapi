@@ -35,7 +35,7 @@ type CategoryFollow struct {
 
 func (s *Service) PublicProfile(ctx context.Context, targetID, viewerID string) (PublicProfile, error) {
 	var item PublicProfile
-	var following, followsYou, blockedByMe int
+	var following, followsYou, blockedByMe bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.id, u.handle, u.display_name, u.avatar_url,
 		       COALESCE('/api/v1/media/' || cover.asset_id, ''), u.bio,
@@ -65,9 +65,9 @@ func (s *Service) PublicProfile(ctx context.Context, targetID, viewerID string) 
 		return PublicProfile{}, fmt.Errorf("load public profile: %w", err)
 	}
 	item.Name = item.DisplayName
-	item.Following = following != 0
-	item.FollowsYou = followsYou != 0
-	item.BlockedByMe = blockedByMe != 0
+	item.Following = following
+	item.FollowsYou = followsYou
+	item.BlockedByMe = blockedByMe
 	return item, nil
 }
 
@@ -98,12 +98,12 @@ func (s *Service) SocialUsers(ctx context.Context, targetID, viewerID, relation 
 	items := []PublicUser{}
 	for rows.Next() {
 		var item PublicUser
-		var following int
+		var following bool
 		if err := rows.Scan(&item.ID, &item.Handle, &item.DisplayName, &item.AvatarURL, &item.Bio, &item.FollowerCount, &following); err != nil {
 			return nil, "", fmt.Errorf("scan %s: %w", relation, err)
 		}
 		item.Name = item.DisplayName
-		item.Following = following != 0
+		item.Following = following
 		items = append(items, item)
 	}
 	next := ""

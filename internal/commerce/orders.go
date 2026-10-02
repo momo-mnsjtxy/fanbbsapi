@@ -68,7 +68,7 @@ const orderSelect = `SELECT id,user_id,status,fulfillment_carrier,tracking_code,
 func loadOrderItems(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, orderID string) ([]OrderItem, error) {
-	rows, err := q.QueryContext(ctx, `SELECT product_id,sku_snapshot,name_snapshot,quantity FROM commerce_order_items WHERE order_id=? ORDER BY rowid`, orderID)
+	rows, err := q.QueryContext(ctx, `SELECT product_id,sku_snapshot,name_snapshot,quantity FROM commerce_order_items WHERE order_id=? ORDER BY product_id`, orderID)
 	if err != nil {
 		return nil, err
 	}
