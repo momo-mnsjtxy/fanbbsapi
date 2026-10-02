@@ -31,6 +31,7 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.Post("/posts", s.createPost)
 		protected.Patch("/posts/{postID}", s.updatePostHTTP)
 		protected.Delete("/posts/{postID}", s.deletePostHTTP)
+		protected.Get("/posts/{postID}/revisions", s.postRevisionsHTTP)
 		protected.Post("/posts/{postID}/comments", s.addComment)
 		protected.Post("/posts/{postID}/comments/{commentID}/replies", s.reply)
 		protected.Patch("/posts/{postID}/comments/{commentID}", s.updateCommentHTTP)
@@ -54,6 +55,7 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.Put("/categories/{categoryID}/follow", s.followCategoryHTTP)
 		protected.Delete("/categories/{categoryID}/follow", s.unfollowCategoryHTTP)
 		protected.Get("/me/category-follows", s.followedCategoriesHTTP)
+		protected.Get("/me/activity", s.ownerActivityHTTP)
 		protected.Get("/notifications", s.notificationsHTTP)
 		protected.Put("/notifications/read", s.markNotificationsReadHTTP)
 		protected.Post("/reports", s.submitReportHTTP)
@@ -71,6 +73,8 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.With(auth.RequireRole("moderator", "admin")).Get("/admin/reports", s.reportsHTTP)
 		protected.With(auth.RequireRole("moderator", "admin")).Post("/admin/reports/{reportID}/decision", s.decideReportHTTP)
 		protected.With(auth.RequireRole("moderator", "admin")).Get("/admin/content", s.adminContentHTTP)
+		protected.With(auth.RequireRole("moderator", "admin")).Post("/admin/posts/{postID}/moderation", s.moderatePostHTTP)
+		protected.With(auth.RequireRole("moderator", "admin")).Patch("/admin/posts/{postID}/controls", s.updatePostControlsHTTP)
 		protected.With(auth.RequireRole("admin")).Get("/admin/users", s.adminUsersHTTP)
 		protected.With(auth.RequireRole("admin")).Patch("/admin/users/{userID}/status", s.updateUserStatusHTTP)
 		protected.With(auth.RequireRole("admin")).Post("/admin/categories", s.createTaxonomyHTTP)
@@ -132,6 +136,10 @@ func (s *Service) createPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := identity.UserFromContext(r.Context())
+	if err := platform.CheckRateLimit(s.postLimiter, user.ID); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
 	post, replayed, err := s.CreatePost(r.Context(), user.ID, strings.TrimSpace(r.Header.Get("Idempotency-Key")), input)
 	if err != nil {
 		platform.WriteError(w, r, err)
@@ -171,6 +179,10 @@ func (s *Service) addComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := identity.UserFromContext(r.Context())
+	if err := platform.CheckRateLimit(s.commentLimiter, user.ID); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
 	if input.Body == "" {
 		input.Body = input.Content
 	}
@@ -199,6 +211,10 @@ func (s *Service) reply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := identity.UserFromContext(r.Context())
+	if err := platform.CheckRateLimit(s.commentLimiter, user.ID); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
 	if input.Body == "" {
 		input.Body = input.Content
 	}

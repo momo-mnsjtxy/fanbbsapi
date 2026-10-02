@@ -46,6 +46,8 @@ type Post struct {
 	Status       string       `json:"status"`
 	Visibility   string       `json:"visibility"`
 	Version      int          `json:"version"`
+	Pinned       bool         `json:"pinned"`
+	Recommended  bool         `json:"recommended"`
 	LikeCount    int          `json:"like_count"`
 	CommentCount int          `json:"comment_count"`
 	RepostCount  int          `json:"repost_count"`

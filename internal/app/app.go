@@ -22,6 +22,7 @@ type App struct {
 	Identity  *identity.Service
 	Community *community.Service
 	Commerce  *commerce.Service
+	Metrics   *platform.Metrics
 	Handler   http.Handler
 }
 
@@ -37,9 +38,15 @@ func NewWithBlob(db *sql.DB, blobs blob.Store) *App {
 	identityService := identity.NewService(db)
 	communityService := community.NewService(db, blobs)
 	commerceService := commerce.NewService(db)
+	metrics := platform.NewMetrics()
 	router := chi.NewRouter()
 	router.Use(platform.RequestIDMiddleware)
+	router.Use(platform.SecurityHeaders)
+	router.Use(metrics.Middleware)
 	router.Use(platform.RecoverMiddleware)
+	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
+		platform.WriteData(w, r, http.StatusOK, metrics.Snapshot())
+	}
 
 	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.PingContext(r.Context()); err != nil {
@@ -48,7 +55,9 @@ func NewWithBlob(db *sql.DB, blobs blob.Store) *App {
 		}
 		platform.WriteData(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	router.Get("/metrics", metricsHandler)
 	router.Route("/api/v1", func(api chi.Router) {
+		api.Get("/metrics", metricsHandler)
 		api.Mount("/auth", identityService.Routes())
 		api.With(identityService.RequireAuth).Post("/auth/logout", identityService.LogoutHandler)
 		api.Group(func(accounts chi.Router) {
@@ -68,5 +77,5 @@ func NewWithBlob(db *sql.DB, blobs blob.Store) *App {
 		})
 	})
 
-	return &App{DB: db, Identity: identityService, Community: communityService, Commerce: commerceService, Handler: router}
+	return &App{DB: db, Identity: identityService, Community: communityService, Commerce: commerceService, Metrics: metrics, Handler: router}
 }

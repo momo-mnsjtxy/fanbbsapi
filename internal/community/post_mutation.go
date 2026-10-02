@@ -5,9 +5,12 @@ package community
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 
 	"fanbbs.local/backend/internal/identity"
 	"fanbbs.local/backend/internal/platform"
@@ -51,6 +54,33 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 	}
 	if version != expectedVersion {
 		return Post{}, platform.Problem(http.StatusConflict, "version_conflict", "文章已被其他操作更新，请刷新后重试")
+	}
+	tagIDs := []string{}
+	tagRows, err := tx.QueryContext(ctx, `SELECT tag_id FROM post_tags WHERE post_id = ? ORDER BY tag_id`, postID)
+	if err != nil {
+		return Post{}, fmt.Errorf("load post revision tags: %w", err)
+	}
+	for tagRows.Next() {
+		var tagID string
+		if err := tagRows.Scan(&tagID); err != nil {
+			tagRows.Close()
+			return Post{}, fmt.Errorf("scan post revision tag: %w", err)
+		}
+		tagIDs = append(tagIDs, tagID)
+	}
+	if err := tagRows.Close(); err != nil {
+		return Post{}, fmt.Errorf("close post revision tags: %w", err)
+	}
+	sort.Strings(tagIDs)
+	encodedTagIDs, err := json.Marshal(tagIDs)
+	if err != nil {
+		return Post{}, fmt.Errorf("encode post revision tags: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO post_revisions(post_id, version, title, summary, body, category_id, tag_ids, visibility, edited_by, created_at)
+		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?)`, postID, version, title, summary, body, categoryID,
+		string(encodedTagIDs), visibility, authorID, s.now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return Post{}, fmt.Errorf("store post revision: %w", err)
 	}
 	if input.Title != nil {
 		title = strings.TrimSpace(*input.Title)

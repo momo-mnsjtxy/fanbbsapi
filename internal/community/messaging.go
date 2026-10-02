@@ -737,6 +737,10 @@ func (s *Service) sendMessageHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current, _ := identity.UserFromContext(r.Context())
+	if err := platform.CheckRateLimit(s.messageLimiter, current.ID); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
 	item, replayed, err := s.SendMessage(r.Context(), chi.URLParam(r, "conversationID"), current.ID, input.ClientMessageID, input.Body)
 	if err != nil {
 		platform.WriteError(w, r, err)

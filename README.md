@@ -4,10 +4,10 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 
 ## Included
 
-- Local registration, Argon2id credentials, opaque 15-minute access tokens, rotating 30-day refresh sessions, password/profile changes, soft deactivation, and server-side revocation
+- Local registration, Argon2id credentials, opaque 15-minute access tokens, rotating 30-day refresh sessions, one-time local recovery codes (displayed once and hashed at rest), password/profile changes, soft deactivation, and server-side revocation
 - `recommend`/`recommended`, `latest`, `global`, and authenticated `following` feeds with opaque cursor pagination
 - Post create/detail, threaded comments/replies, idempotent post and comment creation
-- Post/comment edit and soft delete with required `If-Match` versions; idempotent comment likes
+- Post/comment edit and soft delete with required `If-Match` versions, immutable owner-readable post revision history, and idempotent comment likes
 - Bounded local-filesystem media uploads behind a blob interface, post attachment, and avatar upload/reference flow
 - Transaction-safe, idempotent like/unlike and repost/undo-repost operations
 - Idempotent bookmarks/follows, separate categories/tags, and viewer-aware search
@@ -18,7 +18,8 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 - Local non-payment product/type catalog administration, bounded integer inventory, owner carts, idempotent order creation with atomic reservation, and explicit `created`/`cancelled`/`fulfilled` lifecycle
 - Audited manual fulfillment metadata, exact-once cancellation inventory restoration, and owner-scoped order reads; orders contain no money, payment, wallet, or provider state
 - UTC daily check-in, immutable award-only local points, admin-verified task rewards, threshold-derived levels/titles/ranks, and avatar-frame catalog/entitlement/selection with duplicate-award guards
-- Member reports, filtered moderator/admin content review, admin user status controls with session revocation, audited category/tag CRUD, role checks, and immutable audit events
+- Member reports, explicit pending-to-published/rejected post review, audited moderator/admin pin/recommend controls, filtered content review, admin user status controls with session revocation, audited category/tag CRUD, role checks, and immutable audit events
+- Privacy-safe owner activity history, bounded local rate limits for login and write-heavy endpoints, security response headers, structured request logs, and process-local `/metrics`
 - SQLite foreign keys, embedded forward migrations, local demo seed, request IDs, validation and consistent error envelopes
 - OpenAPI contract at `api/openapi.yaml`
 - Explicit disabled boundaries for SMS, payment, cash wallet, withdrawal, lottery, paid-content purchase and external fulfillment integrations
@@ -58,7 +59,7 @@ find cmd internal migrations -name '*.go' -print0 | xargs -0 /tmp/go1.26.5/bin/g
 /tmp/go1.26.5/bin/go vet ./...
 ```
 
-The integration suite uses a real temporary SQLite database. It covers registration/profile/password/deactivation, all four feeds, cross-user follower visibility, create/detail/comments/replies, taxonomy/search, bookmarks/follows, durable notifications, moderator/admin RBAC, immutable audits, idempotency, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
+The integration suite uses a real temporary SQLite database. It covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
 
 It also covers upload MIME/ownership/visibility and public/private cache policy, avatar/cover references, device-session ownership/revocation, public-profile and block visibility, category follows/feed filters, monotonic read receipts and safe conversation leave, homepage version/audit rollback, stale post/comment writes, comment reactions, moderated counter/repost cleanup, and deterministic synthetic legacy import with quarantine/count reconciliation.
 

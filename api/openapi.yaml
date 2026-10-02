@@ -4,7 +4,8 @@ info:
   version: 0.2.0
   description: >-
     Contract for the locally runnable identity, community, private-messaging,
-    notification, moderation, administration, local non-payment commerce, and
+    notification, moderation, administration, local account recovery,
+    local non-payment commerce, and
     non-cash gamification slice. Messaging uses durable
     HTTP resources plus a polling event cursor; WebSockets and external push are
     not enabled. External SMS/email/OAuth, payments, cash wallets, withdrawals,
@@ -55,7 +56,29 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/Session'}
         '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /auth/recover:
+    post:
+      summary: Redeem one local recovery code, reset the password, revoke sessions, and rotate codes
+      description: Recovery codes are generated locally, stored only as digests, and returned in plaintext only when issued. No email, SMS, or OAuth provider is used.
+      operationId: recoverLocalAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identity, recovery_code, new_password]
+              properties:
+                identity: {type: string, description: Handle or email. `account` is also accepted.}
+                recovery_code: {type: string}
+                new_password: {type: string, minLength: 8, maxLength: 128}
+      responses:
+        '200': {description: Password changed and replacement one-time recovery codes issued, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
   /auth/refresh:
     post:
       summary: Rotate a refresh session
@@ -101,7 +124,7 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
     post:
-      summary: Publish a post
+      summary: Publish a post or explicitly submit it for moderation
       operationId: createPost
       security: [{bearerAuth: []}]
       parameters:
@@ -116,6 +139,7 @@ paths:
         '200': {description: Idempotent replay, headers: {Idempotency-Replayed: {schema: {type: string, const: 'true'}}}, content: {application/json: {schema: {$ref: '#/components/schemas/PostEnvelope'}}}}
         '401': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
   /feeds/{feed}:
     get:
       summary: List a named feed
@@ -213,6 +237,19 @@ paths:
         '200': {$ref: '#/components/responses/Comment'}
         '401': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/revisions:
+    get:
+      summary: List immutable prior versions of an owned post
+      operationId: listOwnedPostRevisions
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Owner-only prior post snapshots, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
   /posts/{post_id}/comments/{comment_id}/replies:
     post:
       summary: Reply to one comment
@@ -452,6 +489,33 @@ paths:
       responses:
         '200': {description: Password changed, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
         '401': {$ref: '#/components/responses/Error'}
+  /me/recovery-codes/rotate:
+    post:
+      summary: Revoke active recovery codes and issue a replacement set once
+      operationId: rotateMyRecoveryCodes
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password]
+              properties: {current_password: {type: string}}
+      responses:
+        '200': {description: New plaintext recovery codes; this response is their only display, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /me/activity:
+    get:
+      summary: List privacy-safe post, comment, and report activity for the authenticated owner
+      operationId: listMyActivity
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: IDs, actions, states and timestamps without bodies, messages or contact data, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
   /categories:
     get:
       summary: List categories
@@ -725,7 +789,7 @@ paths:
       security: [{bearerAuth: []}]
       parameters:
         - {name: type, in: query, schema: {type: string, enum: [all, post, comment], default: all}}
-        - {name: status, in: query, schema: {type: string, enum: [draft, published, deleted]}}
+        - {name: status, in: query, schema: {type: string, enum: [draft, pending, published, rejected, deleted]}}
         - {name: author_id, in: query, schema: {type: string}}
         - {name: report_status, in: query, schema: {type: string, enum: [open, dismissed, actioned]}}
         - {name: q, in: query, schema: {type: string, maxLength: 100}}
@@ -738,6 +802,50 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}/moderation:
+    post:
+      summary: Transition an explicitly pending post to published or rejected
+      operationId: moderatePendingPost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason]
+              properties:
+                decision: {type: string, enum: [published, rejected]}
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {description: Decision and immutable audit event committed atomically, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}/controls:
+    patch:
+      summary: Set audited pin or recommendation controls on a published post
+      operationId: updatePostFeedControls
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                pinned: {type: boolean}
+                recommended: {type: boolean}
+                reason: {type: string, minLength: 3, maxLength: 500}
+              anyOf: [{required: [pinned]}, {required: [recommended]}]
+      responses:
+        '200': {description: Feed controls and immutable audit event committed atomically, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
   /admin/users:
     get:
       summary: Search and filter users (admin only)
@@ -1084,6 +1192,13 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DataEnvelope'}
+  /metrics:
+    get:
+      summary: Read bounded process-local request counters and durations
+      description: Contains route templates and aggregate status/timing only; no identities, request bodies, query strings or bearer tokens.
+      operationId: localMetrics
+      responses:
+        '200': {description: Process-local metrics snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
   /product-types:
     get:
       summary: List active local product types
@@ -1498,9 +1613,11 @@ components:
         summary: {type: string}
         body: {type: string, description: Canonical detail field; omitted from feed items.}
         content: {type: string, description: Vue-compatible content projection.}
-        status: {type: string}
+        status: {type: string, enum: [draft, pending, published, rejected, deleted]}
         visibility: {type: string, enum: [public, followers]}
         version: {type: integer}
+        pinned: {type: boolean}
+        recommended: {type: boolean}
         like_count: {type: integer}
         comment_count: {type: integer}
         repost_count: {type: integer}
@@ -1548,6 +1665,7 @@ components:
         tag_ids: {type: array, maxItems: 10, uniqueItems: true, items: {type: string}}
         media_ids: {type: array, maxItems: 8, uniqueItems: true, items: {type: string}}
         visibility: {type: string, enum: [public, followers], default: public}
+        status: {type: string, enum: [pending], description: Explicitly submit for moderator review; omit for the backward-compatible immediate-publish flow.}
       anyOf: [{required: [content]}, {required: [body]}]
     Session:
       type: object
@@ -1559,6 +1677,7 @@ components:
         token_type: {type: string, const: Bearer}
         expires_in: {type: integer, const: 900}
         user: {$ref: '#/components/schemas/User'}
+        recovery_codes: {type: array, minItems: 8, maxItems: 8, items: {type: string}, description: Present only in the registration response and never returned by login or refresh.}
     DataEnvelope:
       type: object
       required: [data, meta]

@@ -17,6 +17,7 @@ func (s *Service) Routes() chi.Router {
 	router.Post("/register", s.register)
 	router.Post("/login", s.login)
 	router.Post("/refresh", s.refresh)
+	router.Post("/recover", s.recoverHTTP)
 	return router
 }
 
@@ -24,6 +25,7 @@ func (s *Service) RegisterAccountRoutes(router chi.Router) {
 	router.Get("/me", s.me)
 	router.Patch("/me/profile", s.updateProfile)
 	router.Put("/me/password", s.changePassword)
+	router.Post("/me/recovery-codes/rotate", s.rotateRecoveryCodesHTTP)
 	router.Get("/me/sessions", s.sessionsHTTP)
 	router.Delete("/me/sessions/{sessionID}", s.revokeSessionHTTP)
 	router.Delete("/me", s.deactivate)
@@ -56,6 +58,10 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Account == "" {
 		input.Account = input.Identity
+	}
+	if err := platform.CheckRateLimit(s.loginLimiter, platform.RemoteHost(r)+":"+strings.ToLower(strings.TrimSpace(input.Account))); err != nil {
+		platform.WriteError(w, r, err)
+		return
 	}
 	session, err := s.Login(r.Context(), input.Account, input.Password)
 	if err != nil {

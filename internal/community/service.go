@@ -17,13 +17,21 @@ import (
 )
 
 type Service struct {
-	db    *sql.DB
-	blobs blob.Store
-	now   func() time.Time
+	db             *sql.DB
+	blobs          blob.Store
+	now            func() time.Time
+	postLimiter    *platform.RateLimiter
+	commentLimiter *platform.RateLimiter
+	messageLimiter *platform.RateLimiter
+	uploadLimiter  *platform.RateLimiter
 }
 
 func NewService(db *sql.DB, blobs blob.Store) *Service {
-	return &Service{db: db, blobs: blobs, now: time.Now}
+	return &Service{
+		db: db, blobs: blobs, now: time.Now,
+		postLimiter: platform.NewRateLimiter(4096, 30, time.Minute), commentLimiter: platform.NewRateLimiter(4096, 60, time.Minute),
+		messageLimiter: platform.NewRateLimiter(4096, 60, time.Minute), uploadLimiter: platform.NewRateLimiter(4096, 20, time.Minute),
+	}
 }
 
 type CreatePostInput struct {
@@ -36,6 +44,7 @@ type CreatePostInput struct {
 	TagIDs     []string `json:"tag_ids"`
 	MediaIDs   []string `json:"media_ids"`
 	Visibility string   `json:"visibility"`
+	Status     string   `json:"status,omitempty"`
 }
 
 func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey string, input CreatePostInput) (Post, bool, error) {
@@ -46,6 +55,7 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 	input.Content = strings.TrimSpace(input.Content)
 	input.CategoryID = strings.TrimSpace(input.CategoryID)
 	input.Visibility = strings.TrimSpace(input.Visibility)
+	input.Status = strings.TrimSpace(input.Status)
 	if input.Body == "" {
 		input.Body = input.Content
 	}
@@ -77,6 +87,9 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 	}
 	if input.Visibility != "public" && input.Visibility != "followers" {
 		fields["visibility"] = []string{"可见性必须是 public 或 followers"}
+	}
+	if input.Status != "" && input.Status != "pending" {
+		fields["status"] = []string{"status 只能省略或设为 pending"}
 	}
 	if len(input.Summary) > 500 {
 		fields["summary"] = []string{"摘要不能超过 500 个字符"}
@@ -126,7 +139,7 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 		err := tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE user_id = ? AND scope = 'create_post' AND key = ?`, authorID, idempotencyKey).Scan(&existingID)
 		if err == nil {
 			tx.Rollback()
-			post, err := s.Post(ctx, existingID, authorID)
+			post, err := s.postForOwner(ctx, existingID, authorID)
 			return post, true, err
 		}
 		if err != sql.ErrNoRows {
@@ -142,11 +155,20 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 	if input.CategoryID != "" {
 		category = input.CategoryID
 	}
+	databaseStatus := "published"
+	if input.Status == "pending" {
+		databaseStatus = "draft"
+	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO posts(id, author_id, kind, title, summary, body, category_id, visibility, created_at, published_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, postID, authorID, input.Kind, input.Title, input.Summary, input.Body, category, input.Visibility, now, now)
+		INSERT INTO posts(id, author_id, kind, title, summary, body, category_id, status, visibility, created_at, published_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, postID, authorID, input.Kind, input.Title, input.Summary, input.Body, category, databaseStatus, input.Visibility, now, now)
 	if err != nil {
 		return Post{}, false, fmt.Errorf("insert post: %w", err)
+	}
+	if input.Status == "pending" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO post_moderation(post_id, state, updated_at) VALUES (?, 'pending', ?)`, postID, now); err != nil {
+			return Post{}, false, fmt.Errorf("submit post for moderation: %w", err)
+		}
 	}
 	for tagID := range seenTags {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO post_tags(post_id, tag_id) VALUES (?, ?)`, postID, tagID); err != nil {
@@ -183,7 +205,7 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 	if err := tx.Commit(); err != nil {
 		return Post{}, false, fmt.Errorf("commit create post: %w", err)
 	}
-	post, err := s.Post(ctx, postID, authorID)
+	post, err := s.postForOwner(ctx, postID, authorID)
 	return post, false, err
 }
 
@@ -223,7 +245,7 @@ func (s *Service) ListPostsFiltered(ctx context.Context, feed, viewerID, categor
 		}
 	}
 	where := visiblePostPredicate
-	order := `p.published_at DESC, p.id DESC`
+	order := `COALESCE((SELECT is_pinned FROM post_moderation WHERE post_id = p.id), 0) DESC, p.published_at DESC, p.id DESC`
 	args := []any{viewerID, viewerID, viewerID}
 	args = append(args, visiblePostArgs(viewerID)...)
 	if feed == "following" {
@@ -231,7 +253,7 @@ func (s *Service) ListPostsFiltered(ctx context.Context, feed, viewerID, categor
 		args = append(args, viewerID)
 	}
 	if feed == "recommend" {
-		order = `(p.like_count * 3 + p.comment_count * 5 + p.repost_count * 4) DESC, p.published_at DESC, p.id DESC`
+		order = `COALESCE((SELECT is_pinned FROM post_moderation WHERE post_id = p.id), 0) DESC, COALESCE((SELECT is_recommended FROM post_moderation WHERE post_id = p.id), 0) DESC, (p.like_count * 3 + p.comment_count * 5 + p.repost_count * 4) DESC, p.published_at DESC, p.id DESC`
 	}
 	if categoryID != "" {
 		where += ` AND p.category_id = ?`
@@ -280,7 +302,20 @@ func (s *Service) Post(ctx context.Context, postID, viewerID string) (Post, erro
 	return post, nil
 }
 
-const visiblePostPredicate = `p.status = 'published' AND (
+func (s *Service) postForOwner(ctx context.Context, postID, ownerID string) (Post, error) {
+	post, err := scanPost(s.db.QueryRowContext(ctx, postSelect+`
+		WHERE p.id = ? AND p.author_id = ? AND p.status <> 'deleted'`, ownerID, ownerID, ownerID, postID, ownerID))
+	if err == sql.ErrNoRows {
+		return Post{}, platform.Problem(http.StatusNotFound, "post_not_found", "文章不存在")
+	}
+	if err != nil {
+		return Post{}, fmt.Errorf("load owner post: %w", err)
+	}
+	return post, nil
+}
+
+const visiblePostPredicate = `p.status = 'published'
+AND COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), 'published') = 'published' AND (
 	p.visibility = 'public'
 	OR p.author_id = ?
 	OR (p.visibility = 'followers' AND EXISTS (
@@ -299,7 +334,9 @@ func visiblePostArgs(viewerID string) []any {
 
 const postSelect = `
 	SELECT p.id, p.kind, COALESCE(p.repost_of, ''), p.title, p.summary, p.body,
-	       p.status, p.visibility, p.version, p.like_count, p.comment_count,
+	       COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status), p.visibility, p.version,
+	       COALESCE((SELECT is_pinned FROM post_moderation WHERE post_id = p.id), 0),
+	       COALESCE((SELECT is_recommended FROM post_moderation WHERE post_id = p.id), 0), p.like_count, p.comment_count,
 	       p.repost_count, p.created_at, p.published_at,
 	       u.id, u.handle, u.display_name, u.avatar_url,
 	       COALESCE(c.id, ''), COALESCE(c.slug, ''), COALESCE(c.name, ''),
@@ -324,10 +361,10 @@ type scanner interface {
 func scanPost(row scanner) (Post, error) {
 	var post Post
 	var category Category
-	var liked, reposted, bookmarked int
+	var liked, reposted, bookmarked, pinned, recommended int
 	var tagData, mediaData string
 	err := row.Scan(&post.ID, &post.Kind, &post.RepostOf, &post.Title, &post.Summary, &post.Body,
-		&post.Status, &post.Visibility, &post.Version, &post.LikeCount, &post.CommentCount,
+		&post.Status, &post.Visibility, &post.Version, &pinned, &recommended, &post.LikeCount, &post.CommentCount,
 		&post.RepostCount, &post.CreatedAt, &post.PublishedAt,
 		&post.Author.ID, &post.Author.Handle, &post.Author.DisplayName, &post.Author.AvatarURL,
 		&category.ID, &category.Slug, &category.Name, &tagData, &mediaData, &liked, &reposted, &bookmarked)
@@ -357,6 +394,8 @@ func scanPost(row scanner) (Post, error) {
 		}
 	}
 	post.Liked = liked != 0
+	post.Pinned = pinned != 0
+	post.Recommended = recommended != 0
 	post.Reposted = reposted != 0
 	post.Bookmarked = bookmarked != 0
 	post.Author.Name = post.Author.DisplayName

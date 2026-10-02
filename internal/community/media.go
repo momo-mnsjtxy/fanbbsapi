@@ -127,6 +127,11 @@ func (s *Service) avatarHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) coverHTTP(w http.ResponseWriter, r *http.Request) {
+	current, _ := identity.UserFromContext(r.Context())
+	if err := platform.CheckRateLimit(s.uploadLimiter, current.ID); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, blob.MaxSize+(1<<20))
 	if err := r.ParseMultipartForm(blob.MaxSize + (1 << 20)); err != nil {
 		platform.WriteError(w, r, platform.Problem(http.StatusBadRequest, "invalid_multipart", "上传请求格式不正确或文件过大"))
@@ -138,7 +143,6 @@ func (s *Service) coverHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	current, _ := identity.UserFromContext(r.Context())
 	asset, err := s.Upload(r.Context(), current.ID, "post", header.Filename, r.FormValue("alt_text"), file)
 	if err != nil {
 		platform.WriteError(w, r, err)
@@ -164,6 +168,11 @@ func (s *Service) coverHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) uploadPurposeHTTP(w http.ResponseWriter, r *http.Request, purpose string) {
+	current, _ := identity.UserFromContext(r.Context())
+	if err := platform.CheckRateLimit(s.uploadLimiter, current.ID); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, blob.MaxSize+(1<<20))
 	if err := r.ParseMultipartForm(blob.MaxSize + (1 << 20)); err != nil {
 		platform.WriteError(w, r, platform.Problem(http.StatusBadRequest, "invalid_multipart", "上传请求格式不正确或文件过大"))
@@ -175,7 +184,6 @@ func (s *Service) uploadPurposeHTTP(w http.ResponseWriter, r *http.Request, purp
 		return
 	}
 	defer file.Close()
-	current, _ := identity.UserFromContext(r.Context())
 	asset, err := s.Upload(r.Context(), current.ID, purpose, header.Filename, r.FormValue("alt_text"), file)
 	if err != nil {
 		platform.WriteError(w, r, err)

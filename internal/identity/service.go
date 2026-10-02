@@ -27,8 +27,9 @@ const (
 )
 
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	db           *sql.DB
+	now          func() time.Time
+	loginLimiter *platform.RateLimiter
 }
 
 var handlePattern = regexp.MustCompile(`^[a-z0-9_]{3,24}$`)
@@ -47,7 +48,7 @@ type ProfileInput struct {
 }
 
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
+	return &Service{db: db, now: time.Now, loginLimiter: platform.NewRateLimiter(4096, 10, time.Minute)}
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (Session, error) {
@@ -95,6 +96,10 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (Session, e
 	if err != nil {
 		return Session{}, err
 	}
+	recoveryCodes, recoveryRecords, err := newRecoveryCodes(8)
+	if err != nil {
+		return Session{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Session{}, fmt.Errorf("begin registration: %w", err)
@@ -111,9 +116,13 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (Session, e
 	if err := insertSession(ctx, tx, session, user.ID, now); err != nil {
 		return Session{}, err
 	}
+	if err := insertRecoveryCodes(ctx, tx, user.ID, recoveryRecords, now); err != nil {
+		return Session{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Session{}, fmt.Errorf("commit registration: %w", err)
 	}
+	session.RecoveryCodes = recoveryCodes
 	return session, nil
 }
 

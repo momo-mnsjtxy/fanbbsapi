@@ -40,6 +40,8 @@ type ContentReviewItem struct {
 	Title       string `json:"title,omitempty"`
 	Body        string `json:"body"`
 	Visibility  string `json:"visibility,omitempty"`
+	Pinned      bool   `json:"pinned,omitempty"`
+	Recommended bool   `json:"recommended,omitempty"`
 	OpenReports int    `json:"open_reports"`
 	CreatedAt   string `json:"created_at"`
 }
@@ -218,8 +220,8 @@ func (s *Service) AdminContent(ctx context.Context, kind, status, authorID, repo
 	if kind != "all" && kind != "post" && kind != "comment" {
 		fields["type"] = []string{"type 必须是 all、post 或 comment"}
 	}
-	if status != "" && status != "draft" && status != "published" && status != "deleted" {
-		fields["status"] = []string{"status 必须是 draft、published 或 deleted"}
+	if status != "" && status != "draft" && status != "pending" && status != "published" && status != "rejected" && status != "deleted" {
+		fields["status"] = []string{"status 必须是 draft、pending、published、rejected 或 deleted"}
 	}
 	if reportStatus != "" && reportStatus != "open" && reportStatus != "dismissed" && reportStatus != "actioned" {
 		fields["report_status"] = []string{"report_status 必须是 open、dismissed 或 actioned"}
@@ -255,14 +257,17 @@ func (s *Service) AdminContent(ctx context.Context, kind, status, authorID, repo
 	}
 	args = append(args, limit+1, offset)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT content_type, content_id, author_id, content_status, content_title, content_body, visibility,
+		SELECT content_type, content_id, author_id, content_status, content_title, content_body, visibility, is_pinned, is_recommended,
 		       (SELECT COUNT(*) FROM reports r WHERE r.target_type = content_type AND r.target_id = content_id AND r.status = 'open'), created_at
 		FROM (
-			SELECT 'post' AS content_type, p.id AS content_id, p.author_id, p.status AS content_status,
-			       p.title AS content_title, p.body AS content_body, p.visibility, p.created_at
+			SELECT 'post' AS content_type, p.id AS content_id, p.author_id,
+			       COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status) AS content_status,
+			       p.title AS content_title, p.body AS content_body, p.visibility,
+			       COALESCE((SELECT is_pinned FROM post_moderation WHERE post_id = p.id), 0) AS is_pinned,
+			       COALESCE((SELECT is_recommended FROM post_moderation WHERE post_id = p.id), 0) AS is_recommended, p.created_at
 			FROM posts p
 			UNION ALL
-			SELECT 'comment', c.id, c.author_id, c.status, '', c.body, '', c.created_at
+			SELECT 'comment', c.id, c.author_id, c.status, '', c.body, '', 0, 0, c.created_at
 			FROM comments c
 		) review_content
 		WHERE `+strings.Join(where, " AND ")+`
@@ -274,7 +279,7 @@ func (s *Service) AdminContent(ctx context.Context, kind, status, authorID, repo
 	items := []ContentReviewItem{}
 	for rows.Next() {
 		var item ContentReviewItem
-		if err := rows.Scan(&item.Type, &item.ID, &item.AuthorID, &item.Status, &item.Title, &item.Body, &item.Visibility, &item.OpenReports, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.Type, &item.ID, &item.AuthorID, &item.Status, &item.Title, &item.Body, &item.Visibility, &item.Pinned, &item.Recommended, &item.OpenReports, &item.CreatedAt); err != nil {
 			return nil, "", fmt.Errorf("scan admin content: %w", err)
 		}
 		items = append(items, item)

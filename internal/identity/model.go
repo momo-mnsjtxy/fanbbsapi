@@ -21,4 +21,7 @@ type Session struct {
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
 	User         User   `json:"user"`
+	// RecoveryCodes is populated only by registration. Login and refresh never
+	// re-expose these plaintext one-time secrets.
+	RecoveryCodes []string `json:"recovery_codes,omitempty"`
 }

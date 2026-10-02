@@ -1000,3 +1000,147 @@ func TestVersionedHomepageOperationsConfigRBACAndAudit(t *testing.T) {
 		t.Fatalf("homepage audit count mismatch: %d", audits)
 	}
 }
+
+func TestRecoveryCodesAreOneTimeAndRevokeSessions(t *testing.T) {
+	api := newTestAPI(t)
+	registered := expectStatus(t, api.request(http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+		"handle": "recoverable", "email": "recoverable@example.test", "password": "before-recovery-1",
+	}, nil), http.StatusCreated)
+	data := registered["data"].(map[string]any)
+	access := data["access_token"].(string)
+	codes := data["recovery_codes"].([]any)
+	if len(codes) != 8 {
+		t.Fatalf("registration did not issue eight recovery codes: %#v", data)
+	}
+	code := codes[0].(string)
+	var stored string
+	if err := api.db.QueryRow(`SELECT code_hash FROM recovery_codes WHERE user_id = 'usr_missing' OR user_id = (SELECT id FROM users WHERE handle = 'recoverable') LIMIT 1`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == code || strings.Contains(stored, strings.ReplaceAll(code, "-", "")) {
+		t.Fatal("plaintext recovery code was persisted")
+	}
+	recovered := expectStatus(t, api.request(http.MethodPost, "/api/v1/auth/recover", "", map[string]any{
+		"identity": "recoverable", "recovery_code": code, "new_password": "after-recovery-2",
+	}, nil), http.StatusOK)
+	if len(recovered["data"].(map[string]any)["recovery_codes"].([]any)) != 8 {
+		t.Fatalf("recovery did not rotate codes: %#v", recovered)
+	}
+	expectStatus(t, api.request(http.MethodGet, "/api/v1/me", access, nil, nil), http.StatusUnauthorized)
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"identity": "recoverable", "password": "before-recovery-1",
+	}, nil), http.StatusUnauthorized)
+	newAccess, _ := loginAs(t, api, "recoverable", "after-recovery-2")
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/auth/recover", "", map[string]any{
+		"identity": "recoverable", "recovery_code": code, "new_password": "must-not-work-3",
+	}, nil), http.StatusUnauthorized)
+	rotated := expectStatus(t, api.request(http.MethodPost, "/api/v1/me/recovery-codes/rotate", newAccess, map[string]any{
+		"current_password": "after-recovery-2",
+	}, nil), http.StatusOK)
+	if len(rotated["data"].(map[string]any)["recovery_codes"].([]any)) != 8 {
+		t.Fatalf("authenticated rotation did not return eight codes: %#v", rotated)
+	}
+}
+
+func TestPostRevisionOwnerActivityAndModerationWorkflow(t *testing.T) {
+	api := newTestAPI(t)
+	if _, err := api.db.Exec(`UPDATE users SET role = 'moderator' WHERE id = 'usr_demo'`); err != nil {
+		t.Fatal(err)
+	}
+	moderatorAccess, _ := loginAs(t, api, "demo", "demo1234")
+	memberAccess, _ := loginAs(t, api, "forest", "demo1234")
+
+	created := expectStatus(t, api.request(http.MethodPost, "/api/v1/posts", memberAccess, map[string]any{
+		"content": "第一版正文用于修订历史", "tag_ids": []string{"tag_go"},
+	}, nil), http.StatusCreated)
+	postID := created["data"].(map[string]any)["id"].(string)
+	expectStatus(t, api.request(http.MethodPatch, "/api/v1/posts/"+postID, memberAccess, map[string]any{
+		"content": "第二版正文用于修订历史",
+	}, map[string]string{"If-Match": `"1"`}), http.StatusOK)
+	revisions := expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+postID+"/revisions", memberAccess, nil, nil), http.StatusOK)
+	revision := revisions["data"].([]any)[0].(map[string]any)
+	if revision["version"] != float64(1) || revision["body"] != "第一版正文用于修订历史" {
+		t.Fatalf("revision snapshot mismatch: %#v", revision)
+	}
+	expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+postID+"/revisions", moderatorAccess, nil, nil), http.StatusNotFound)
+	activityResponse := api.request(http.MethodGet, "/api/v1/me/activity", memberAccess, nil, nil)
+	expectStatus(t, activityResponse, http.StatusOK)
+	if strings.Contains(activityResponse.Body.String(), "第二版正文") || strings.Contains(activityResponse.Body.String(), "forest@") {
+		t.Fatalf("owner activity leaked content or contact fields: %s", activityResponse.Body.String())
+	}
+
+	pending := expectStatus(t, api.request(http.MethodPost, "/api/v1/posts", memberAccess, map[string]any{
+		"content": "需要审核后才能出现在公开信息流", "status": "pending",
+	}, nil), http.StatusCreated)
+	pendingID := pending["data"].(map[string]any)["id"].(string)
+	if pending["data"].(map[string]any)["status"] != "pending" {
+		t.Fatalf("pending post state mismatch: %#v", pending)
+	}
+	expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+pendingID, "", nil, nil), http.StatusNotFound)
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/posts/"+pendingID+"/moderation", memberAccess, map[string]any{
+		"decision": "published", "reason": "成员不能审核自己",
+	}, nil), http.StatusForbidden)
+	queue := expectStatus(t, api.request(http.MethodGet, "/api/v1/admin/content?type=post&status=pending", moderatorAccess, nil, nil), http.StatusOK)
+	if len(queue["data"].([]any)) != 1 {
+		t.Fatalf("pending moderation queue mismatch: %#v", queue)
+	}
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/posts/"+pendingID+"/moderation", moderatorAccess, map[string]any{
+		"decision": "published", "reason": "内容符合社区规则",
+	}, nil), http.StatusOK)
+	expectStatus(t, api.request(http.MethodPatch, "/api/v1/admin/posts/"+pendingID+"/controls", moderatorAccess, map[string]any{
+		"pinned": true, "recommended": true, "reason": "本周社区精选",
+	}, nil), http.StatusOK)
+	publicPost := expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+pendingID, "", nil, nil), http.StatusOK)
+	if publicPost["data"].(map[string]any)["pinned"] != true || publicPost["data"].(map[string]any)["recommended"] != true {
+		t.Fatalf("feed controls were not reflected on post: %#v", publicPost)
+	}
+	feed := expectStatus(t, api.request(http.MethodGet, "/api/v1/feeds/recommend?limit=1", "", nil, nil), http.StatusOK)
+	if feed["data"].([]any)[0].(map[string]any)["id"] != pendingID {
+		t.Fatalf("pinned post was not safely prioritized: %#v", feed)
+	}
+	var audits int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE target_id = ? AND action IN ('post_moderation_decision','post_feed_controls_update')`, pendingID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 2 {
+		t.Fatalf("moderation audit count mismatch: %d", audits)
+	}
+
+	rejected := expectStatus(t, api.request(http.MethodPost, "/api/v1/posts", memberAccess, map[string]any{
+		"content": "用于验证拒绝路径的待审内容", "status": "pending",
+	}, nil), http.StatusCreated)
+	rejectedID := rejected["data"].(map[string]any)["id"].(string)
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/posts/"+rejectedID+"/moderation", moderatorAccess, map[string]any{
+		"decision": "rejected", "reason": "测试拒绝状态转换",
+	}, nil), http.StatusOK)
+	expectStatus(t, api.request(http.MethodGet, "/api/v1/posts/"+rejectedID, "", nil, nil), http.StatusNotFound)
+}
+
+func TestSecurityHeadersMetricsAndLoginRateLimit(t *testing.T) {
+	api := newTestAPI(t)
+	health := api.request(http.MethodGet, "/healthz", "", nil, nil)
+	expectStatus(t, health, http.StatusOK)
+	for name, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+	} {
+		if health.Header().Get(name) != want {
+			t.Fatalf("security header %s=%q want=%q", name, health.Header().Get(name), want)
+		}
+	}
+	metrics := expectStatus(t, api.request(http.MethodGet, "/metrics", "", nil, nil), http.StatusOK)
+	if len(metrics["data"].(map[string]any)["requests"].([]any)) == 0 {
+		t.Fatalf("metrics did not include completed request: %#v", metrics)
+	}
+	for attempt := 0; attempt < 10; attempt++ {
+		expectStatus(t, api.request(http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+			"identity": "missing-rate-limit-user", "password": "not-a-password",
+		}, nil), http.StatusUnauthorized)
+	}
+	limitedResponse := api.request(http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"identity": "missing-rate-limit-user", "password": "not-a-password",
+	}, nil)
+	limited := expectStatus(t, limitedResponse, http.StatusTooManyRequests)
+	if limited["error"].(map[string]any)["code"] != "rate_limit_exceeded" || limitedResponse.Header().Get("Retry-After") == "" {
+		t.Fatalf("rate limit response mismatch: %#v headers=%v", limited, limitedResponse.Header())
+	}
+}
