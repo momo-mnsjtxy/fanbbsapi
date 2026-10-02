@@ -8,7 +8,7 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 - `recommend`/`recommended`, `latest`, `global`, and authenticated `following` feeds with opaque cursor pagination
 - Post create/detail, threaded comments/replies, idempotent post and comment creation
 - Post/comment edit and soft delete with required `If-Match` versions, immutable owner-readable post revision history, and idempotent comment likes
-- Bounded local-filesystem media uploads behind a blob interface, post attachment, and avatar upload/reference flow
+- Bounded local-filesystem media uploads behind a blob interface, post attachment, avatar upload/reference flow, owner-scoped abandonment, and retryable orphan expiry cleanup
 - Transaction-safe, idempotent like/unlike and repost/undo-repost operations
 - Idempotent bookmarks/follows, separate categories/tags, and viewer-aware search
 - Durable owner-scoped notifications, including private-message notifications, generated inside source transactions
@@ -50,6 +50,8 @@ Configuration:
 | `FANBBS_DB` | `fanbbs.db` | SQLite database path |
 | `FANBBS_SEED_DEMO` | SQLite: `true`; PostgreSQL: `false` | Seed local demo users/content when the user table is empty |
 | `FANBBS_BLOB_DIR` | `data/blobs` | Local-development blob directory |
+| `FANBBS_MEDIA_RETENTION` | `24h` | Minimum age for the one-shot worker to expire unattached media |
+| `FANBBS_MEDIA_CLEANUP_LIMIT` | `100` | Maximum candidates and queued blob deletes per worker pass (1–1000) |
 
 The optional seed contains local test identities used by the integration suite. They are development fixtures only. Set `FANBBS_SEED_DEMO=false` outside local development; production guidance never relies on seeded credentials.
 
@@ -61,7 +63,13 @@ FANBBS_DATABASE_URL='postgres://fanbbs:password@db.example/fanbbs?sslmode=verify
 go run ./cmd/migrate -driver postgres
 ```
 
-PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `007`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
+Run a bounded orphan-media cleanup pass (suitable for deployment cron):
+
+```sh
+FANBBS_DB=fanbbs.db FANBBS_BLOB_DIR=data/blobs go run ./cmd/worker
+```
+
+PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `008`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
 
 ## Verify
 
@@ -71,7 +79,7 @@ find cmd internal migrations -name '*.go' -print0 | xargs -0 /tmp/go1.26.5/bin/g
 /tmp/go1.26.5/bin/go vet ./...
 ```
 
-The integration suite uses a real temporary SQLite database and CI PostgreSQL 17 service. The PostgreSQL rehearsal covers all seven migrations and idempotent reapplication, registration/login/authentication, follower visibility and feed reads, idempotent post/comment writes, reactions, optimistic edits, deterministic synthetic import reconciliation/quarantine/replay, and trigger-forced import rollback. The broader SQLite suite covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
+The integration suite uses a real temporary SQLite database and CI PostgreSQL 17 service. The PostgreSQL rehearsal covers all eight migrations and idempotent reapplication, registration/login/authentication, follower visibility and feed reads, idempotent post/comment writes, reactions, optimistic edits, deterministic synthetic import reconciliation/quarantine/replay, and trigger-forced import rollback. The broader SQLite suite covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
 
 It also covers upload MIME/ownership/visibility and public/private cache policy, avatar/cover references, device-session ownership/revocation, public-profile and block visibility, category follows/feed filters, monotonic read receipts and safe conversation leave, homepage version/audit rollback, stale post/comment writes, comment reactions, moderated counter/repost cleanup, and deterministic synthetic legacy import with quarantine/count reconciliation.
 
@@ -121,7 +129,7 @@ The API accepts the Vue slice's compact names (`identity`, `content`, `recommend
 ```text
 cmd/api                 HTTP process
 cmd/migrate             migration-only process
-cmd/worker              explicit no-enabled-jobs worker boundary
+cmd/worker              one-shot local orphan-media cleanup worker
 internal/identity       passwords and sessions
 internal/community      posts, feeds, comments, social relations, taxonomy,
                         search, notifications, private messaging, moderation

@@ -212,3 +212,205 @@ func (s *Service) mediaHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, content)
 }
+
+// AbandonMedia removes an owner's media only while it has no durable
+// reference. Deleting the metadata row (rather than merely changing status)
+// lets database foreign keys arbitrate races with post/avatar/cover/homepage
+// attachment. The object key is queued in the same transaction so a failed
+// filesystem delete can be retried without ever reviving public metadata.
+func (s *Service) AbandonMedia(ctx context.Context, ownerID, assetID string) error {
+	assetID = strings.TrimSpace(assetID)
+	if assetID == "" {
+		return platform.Problem(http.StatusNotFound, "media_not_found", "媒体不存在")
+	}
+	deleted, objectKey, err := s.queueMediaDeletion(ctx, assetID, ownerID, time.Time{})
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		var owned int
+		err := s.db.QueryRowContext(ctx, `SELECT 1 FROM media_assets WHERE id = ? AND owner_id = ? AND status = 'ready'`, assetID, ownerID).Scan(&owned)
+		if err == sql.ErrNoRows {
+			return platform.Problem(http.StatusNotFound, "media_not_found", "媒体不存在")
+		}
+		if err != nil {
+			return fmt.Errorf("check abandoned media: %w", err)
+		}
+		return platform.Problem(http.StatusConflict, "media_attached", "媒体已被使用，不能放弃")
+	}
+	// Logical deletion is complete even if the local filesystem is briefly
+	// unavailable. A durable queue entry preserves the retry obligation.
+	_ = s.deleteQueuedMedia(ctx, objectKey)
+	return nil
+}
+
+// MediaCleanupResult describes one bounded orphan cleanup pass.
+type MediaCleanupResult struct {
+	Expired int `json:"expired"`
+	Deleted int `json:"deleted"`
+	Pending int `json:"pending"`
+}
+
+// CleanupExpiredMedia expires unreferenced media created before the cutoff and
+// retries previously queued filesystem deletes. Attached assets are protected
+// both by the predicates below and by database foreign keys at deletion time.
+func (s *Service) CleanupExpiredMedia(ctx context.Context, before time.Time, limit int) (MediaCleanupResult, error) {
+	if before.IsZero() {
+		return MediaCleanupResult{}, fmt.Errorf("cleanup media: cutoff is required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM media_assets
+		WHERE status = 'ready' AND created_at < ?
+		  AND NOT EXISTS (SELECT 1 FROM post_media WHERE asset_id = media_assets.id)
+		  AND NOT EXISTS (SELECT 1 FROM users WHERE avatar_media_id = media_assets.id)
+		  AND NOT EXISTS (SELECT 1 FROM user_covers WHERE asset_id = media_assets.id)
+		  AND NOT EXISTS (SELECT 1 FROM operations_config_media WHERE asset_id = media_assets.id)
+		ORDER BY created_at, id LIMIT ?`, before.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return MediaCleanupResult{}, fmt.Errorf("find expired media: %w", err)
+	}
+	var assetIDs []string
+	for rows.Next() {
+		var assetID string
+		if err := rows.Scan(&assetID); err != nil {
+			rows.Close()
+			return MediaCleanupResult{}, fmt.Errorf("scan expired media: %w", err)
+		}
+		assetIDs = append(assetIDs, assetID)
+	}
+	if err := rows.Close(); err != nil {
+		return MediaCleanupResult{}, fmt.Errorf("close expired media: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return MediaCleanupResult{}, fmt.Errorf("list expired media: %w", err)
+	}
+
+	result := MediaCleanupResult{}
+	for _, assetID := range assetIDs {
+		deleted, _, err := s.queueMediaDeletion(ctx, assetID, "", before)
+		if err != nil {
+			return result, err
+		}
+		if deleted {
+			result.Expired++
+		}
+	}
+	result.Deleted, err = s.drainMediaDeletionQueue(ctx, limit)
+	if err != nil {
+		return result, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_deletion_queue`).Scan(&result.Pending); err != nil {
+		return result, fmt.Errorf("count pending media deletes: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Service) queueMediaDeletion(ctx context.Context, assetID, ownerID string, before time.Time) (bool, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, "", fmt.Errorf("begin media deletion: %w", err)
+	}
+	defer tx.Rollback()
+	where := `id = ? AND status = 'ready'`
+	args := []any{assetID}
+	if ownerID != "" {
+		where += ` AND owner_id = ?`
+		args = append(args, ownerID)
+	}
+	if !before.IsZero() {
+		where += ` AND created_at < ?`
+		args = append(args, before.UTC().Format(time.RFC3339Nano))
+	}
+	where += `
+		AND NOT EXISTS (SELECT 1 FROM post_media WHERE asset_id = media_assets.id)
+		AND NOT EXISTS (SELECT 1 FROM users WHERE avatar_media_id = media_assets.id)
+		AND NOT EXISTS (SELECT 1 FROM user_covers WHERE asset_id = media_assets.id)
+		AND NOT EXISTS (SELECT 1 FROM operations_config_media WHERE asset_id = media_assets.id)`
+	var objectKey string
+	if err := tx.QueryRowContext(ctx, `SELECT object_key FROM media_assets WHERE `+where, args...).Scan(&objectKey); err == sql.ErrNoRows {
+		return false, "", nil
+	} else if err != nil {
+		return false, "", fmt.Errorf("load media deletion candidate: %w", err)
+	}
+	deleteResult, err := tx.ExecContext(ctx, `DELETE FROM media_assets WHERE `+where, args...)
+	if err != nil {
+		// A concurrent attachment may win after candidate selection. The foreign
+		// key rejection is the final safety boundary; leave the asset untouched.
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "foreign key") || strings.Contains(message, "constraint") {
+			return false, "", nil
+		}
+		return false, "", fmt.Errorf("delete media metadata: %w", err)
+	}
+	changed, err := deleteResult.RowsAffected()
+	if err != nil {
+		return false, "", fmt.Errorf("count deleted media: %w", err)
+	}
+	if changed != 1 {
+		return false, "", nil
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO media_deletion_queue(object_key, queued_at) VALUES (?, ?)
+		ON CONFLICT(object_key) DO NOTHING`, objectKey, s.now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, "", fmt.Errorf("queue media blob deletion: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, "", fmt.Errorf("commit media deletion: %w", err)
+	}
+	return true, objectKey, nil
+}
+
+func (s *Service) drainMediaDeletionQueue(ctx context.Context, limit int) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT object_key FROM media_deletion_queue ORDER BY queued_at, object_key LIMIT ?`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("load pending media deletes: %w", err)
+	}
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan pending media delete: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close pending media deletes: %w", err)
+	}
+	deleted := 0
+	for _, key := range keys {
+		if err := s.deleteQueuedMedia(ctx, key); err != nil {
+			continue
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+func (s *Service) deleteQueuedMedia(ctx context.Context, objectKey string) error {
+	if err := s.blobs.Delete(ctx, objectKey); err != nil {
+		_, updateErr := s.db.ExecContext(ctx, `
+			UPDATE media_deletion_queue SET attempts = attempts + 1, last_error = ? WHERE object_key = ?`, err.Error(), objectKey)
+		if updateErr != nil {
+			return fmt.Errorf("delete media blob: %v (record retry: %w)", err, updateErr)
+		}
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM media_deletion_queue WHERE object_key = ?`, objectKey); err != nil {
+		return fmt.Errorf("finish media blob deletion: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) abandonMediaHTTP(w http.ResponseWriter, r *http.Request) {
+	current, _ := identity.UserFromContext(r.Context())
+	if err := s.AbandonMedia(r.Context(), current.ID, mediaID(r)); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

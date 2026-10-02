@@ -454,6 +454,17 @@ paths:
         '201': {$ref: '#/components/responses/Media'}
         '413': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /uploads/{media_id}:
+    delete:
+      summary: Abandon owned media that has not been attached to any resource
+      description: Deletes only owner-scoped, unreferenced media from the local blob lifecycle. Attached post, avatar, cover, and homepage assets are never deleted.
+      operationId: abandonMedia
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/MediaID'}]
+      responses:
+        '204': {description: Unattached media abandoned; an empty response is returned}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
   /media/{media_id}:
     get:
       summary: Stream owned, avatar, or viewer-visible post media
