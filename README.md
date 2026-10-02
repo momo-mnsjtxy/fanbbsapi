@@ -15,10 +15,13 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 - Database-backed, membership-scoped private conversations and messages with sender idempotency, opaque cursors, monotonic read receipts, safe leave lifecycle, and HTTP polling checkpoints for reconnects
 - Public profiles/follower lists, block-aware visibility, category follows, category/tag feed filters, device-session management, and profile covers
 - Versioned local homepage/carousel operations configuration with `If-Match`, admin RBAC, media references, and immutable audit
+- Local non-payment product/type catalog administration, bounded integer inventory, owner carts, idempotent order creation with atomic reservation, and explicit `created`/`cancelled`/`fulfilled` lifecycle
+- Audited manual fulfillment metadata, exact-once cancellation inventory restoration, and owner-scoped order reads; orders contain no money, payment, wallet, or provider state
+- UTC daily check-in, immutable award-only local points, admin-verified task rewards, threshold-derived levels/titles/ranks, and avatar-frame catalog/entitlement/selection with duplicate-award guards
 - Member reports, filtered moderator/admin content review, admin user status controls with session revocation, audited category/tag CRUD, role checks, and immutable audit events
 - SQLite foreign keys, embedded forward migrations, local demo seed, request IDs, validation and consistent error envelopes
 - OpenAPI contract at `api/openapi.yaml`
-- Explicit disabled boundaries for SMS, payment, withdrawal and lottery integrations
+- Explicit disabled boundaries for SMS, payment, cash wallet, withdrawal, lottery, paid-content purchase and external fulfillment integrations
 
 SQLite is explicitly the local-development adapter. The approved production target remains PostgreSQL with profiled legacy-data migration and production concurrency testing. This slice is not a production migration or a claim that the remaining original features are complete.
 
@@ -58,6 +61,8 @@ find cmd internal migrations -name '*.go' -print0 | xargs -0 /tmp/go1.26.5/bin/g
 The integration suite uses a real temporary SQLite database. It covers registration/profile/password/deactivation, all four feeds, cross-user follower visibility, create/detail/comments/replies, taxonomy/search, bookmarks/follows, durable notifications, moderator/admin RBAC, immutable audits, idempotency, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
 
 It also covers upload MIME/ownership/visibility and public/private cache policy, avatar/cover references, device-session ownership/revocation, public-profile and block visibility, category follows/feed filters, monotonic read receipts and safe conversation leave, homepage version/audit rollback, stale post/comment writes, comment reactions, moderated counter/repost cleanup, and deterministic synthetic legacy import with quarantine/count reconciliation.
+
+The commerce/gamification integration cases cover admin RBAC, public catalog reads, bounded stock, cart ownership, idempotent checkout, atomic reservation, order masking, exact-once cancellation restoration, terminal fulfillment with audited tracking metadata, forced-audit rollback, duplicate UTC check-ins, immutable point events, admin-verified task awards, duplicate-award prevention, avatar-frame entitlement/selection and disabled payment/wallet/VIP/raffle/paid-content/external-fulfillment capabilities.
 
 ## Synthetic migration rehearsal
 
@@ -102,6 +107,8 @@ internal/identity       passwords and sessions
 internal/community      posts, feeds, comments, social relations, taxonomy,
                         search, notifications, private messaging, moderation
                         and administrative operations
+internal/commerce       local non-payment catalog, bounded inventory, carts,
+                        orders, manual fulfillment and non-cash gamification
 internal/capabilities   disabled external/regulated interfaces
 internal/blob           blob interface and bounded local-filesystem adapter
 internal/legacyimport   synthetic-only deterministic mapper and quarantine report

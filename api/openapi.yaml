@@ -4,10 +4,14 @@ info:
   version: 0.2.0
   description: >-
     Contract for the locally runnable identity, community, private-messaging,
-    notification, moderation, and administration slice. Messaging uses durable
+    notification, moderation, administration, local non-payment commerce, and
+    non-cash gamification slice. Messaging uses durable
     HTTP resources plus a polling event cursor; WebSockets and external push are
-    not enabled. External SMS/email/OAuth, payments, withdrawals, lottery, and
-    external object storage are also not enabled. Media uses the bounded
+    not enabled. External SMS/email/OAuth, payments, cash wallets, withdrawals,
+    lottery, paid-content purchase, external fulfillment, and external object
+    storage are also not enabled. Local orders contain no prices or payment
+    state; local community points cannot be purchased, transferred, redeemed,
+    or spent. Media uses the bounded
     local-filesystem development adapter, and SQLite is for local development
     only rather than the approved production PostgreSQL target.
 servers:
@@ -664,7 +668,7 @@ paths:
       summary: Submit an idempotent report for a visible target
       operationId: submitReport
       security: [{bearerAuth: []}]
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      parameters: [{$ref: '#/components/parameters/RequiredIdempotencyKey'}]
       requestBody:
         required: true
         content:
@@ -1080,6 +1084,279 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DataEnvelope'}
+  /product-types:
+    get:
+      summary: List active local product types
+      operationId: listProductTypes
+      responses: {'200': {description: Product type catalog, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /products:
+    get:
+      summary: List active local products; products intentionally have no price or payment fields
+      operationId: listProducts
+      parameters:
+        - {name: type_id, in: query, schema: {type: string}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {description: Local product catalog, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /products/{product_id}:
+    get:
+      summary: Get an active local product and bounded available inventory
+      operationId: getProduct
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Product, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /me/cart:
+    get:
+      summary: List the authenticated user's local cart
+      operationId: getCart
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Cart, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '401': {$ref: '#/components/responses/Error'}}
+  /me/cart/{product_id}:
+    put:
+      summary: Set a bounded cart quantity after checking current local inventory
+      operationId: setCartItem
+      security: [{bearerAuth: []}]
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [quantity], properties: {quantity: {type: integer, minimum: 1, maximum: 100}}}}}}
+      responses: {'200': {description: Cart item, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+    delete:
+      summary: Remove a local cart item
+      operationId: deleteCartItem
+      security: [{bearerAuth: []}]
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Removal result, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /orders:
+    post:
+      summary: Create a non-payment order and atomically reserve local integer inventory
+      description: Clears the cart in the same transaction. This operation never charges money, spends points, creates a provider intent, or buys paid content.
+      operationId: createLocalOrder
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '201': {description: Inventory reserved and order created, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '200': {description: Idempotent replay, headers: {Idempotency-Replayed: {schema: {type: string, const: 'true'}}}, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+    get:
+      summary: List the authenticated user's orders
+      operationId: listMyOrders
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [created, cancelled, fulfilled]}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {description: Orders, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /orders/{order_id}:
+    get:
+      summary: Get an owned order with immutable product snapshots
+      operationId: getMyOrder
+      security: [{bearerAuth: []}]
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Order, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}}
+  /orders/{order_id}/cancel:
+    post:
+      summary: Cancel an owned created order and restore reserved inventory exactly once
+      operationId: cancelMyOrder
+      security: [{bearerAuth: []}]
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {reason: {type: string, maxLength: 500}}}}}}
+      responses: {'200': {description: Cancelled or idempotent terminal result, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+  /me/check-in:
+    post:
+      summary: Claim the UTC daily local check-in award exactly once
+      description: Awards five local community points. Points are non-cash, non-transferable, non-purchasable, non-redeemable, and unrelated to orders.
+      operationId: dailyCheckIn
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Award or idempotent replay, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/gamification:
+    get:
+      summary: Get local points, threshold-derived level, title, rank, and selected frame
+      operationId: getMyGamification
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Gamification status, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/points:
+    get:
+      summary: List immutable local point awards
+      operationId: listMyPointEvents
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Point awards, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /tasks:
+    get:
+      summary: List active configured tasks and the current user's period claim state
+      description: Task completion is awarded only through an admin-verified local event; clients cannot self-attest completion.
+      operationId: listGamificationTasks
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Tasks, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /ranks:
+    get:
+      summary: List the local lifetime-points leaderboard with levels and titles
+      operationId: listGamificationRanks
+      parameters: [{name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}]
+      responses: {'200': {description: Rank entries, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /avatar-frames:
+    get:
+      summary: List active avatar frames
+      operationId: listAvatarFrames
+      responses: {'200': {description: Frame catalog, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/avatar-frames:
+    get:
+      summary: List active avatar frames with the authenticated user's entitlement and selection state
+      operationId: listMyAvatarFrames
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Frame catalog and entitlements, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/avatar-frame:
+    put:
+      summary: Select an entitled active avatar frame, or clear selection with an empty ID
+      operationId: selectMyAvatarFrame
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [frame_id], properties: {frame_id: {type: string}}}}}}
+      responses: {'200': {description: Selection, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '403': {$ref: '#/components/responses/Error'}}
+  /admin/product-types:
+    get:
+      summary: List all product types including archived types
+      operationId: adminListProductTypes
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Product types, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    post:
+      summary: Create an audited product type
+      operationId: adminCreateProductType
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProductTypeInput'}}}}
+      responses: {'201': {description: Product type, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '403': {$ref: '#/components/responses/Error'}}
+  /admin/product-types/{type_id}:
+    patch:
+      summary: Replace an audited product type configuration
+      operationId: adminUpdateProductType
+      security: [{bearerAuth: []}]
+      parameters: [{name: type_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProductTypeInput'}}}}
+      responses: {'200': {description: Product type, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    delete:
+      summary: Delete an unused product type with an immutable audit event
+      operationId: adminDeleteProductType
+      security: [{bearerAuth: []}]
+      parameters: [{name: type_id, in: path, required: true, schema: {type: string}}, {name: reason, in: query, schema: {type: string, maxLength: 500}}]
+      responses: {'200': {description: Deleted, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+  /admin/products:
+    get:
+      summary: List products including draft and archived products
+      operationId: adminListProducts
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Products, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    post:
+      summary: Create an audited local product with bounded integer inventory
+      operationId: adminCreateProduct
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProductInput'}}}}
+      responses: {'201': {description: Product, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/products/{product_id}:
+    get:
+      summary: Get a product including inactive state
+      operationId: adminGetProduct
+      security: [{bearerAuth: []}]
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Product, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    patch:
+      summary: Update audited catalog and bounded inventory fields
+      operationId: adminUpdateProduct
+      security: [{bearerAuth: []}]
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProductInput'}}}}
+      responses: {'200': {description: Product, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    delete:
+      summary: Delete a never-ordered product; ordered products must be archived
+      operationId: adminDeleteProduct
+      security: [{bearerAuth: []}]
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}, {name: reason, in: query, schema: {type: string, maxLength: 500}}]
+      responses: {'200': {description: Deleted, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+  /admin/orders:
+    get:
+      summary: List all local non-payment orders
+      operationId: adminListOrders
+      security: [{bearerAuth: []}]
+      parameters: [{name: status, in: query, schema: {type: string, enum: [created, cancelled, fulfilled]}}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Orders, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/orders/{order_id}:
+    get:
+      summary: Get any local order
+      operationId: adminGetOrder
+      security: [{bearerAuth: []}]
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Order, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    patch:
+      summary: Audit an explicit local cancellation or manual fulfillment with tracking metadata
+      description: Fulfillment records metadata only; no external shipping or payment provider is called.
+      operationId: adminTransitionOrder
+      security: [{bearerAuth: []}]
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/OrderTransitionInput'}}}}
+      responses: {'200': {description: Transitioned order, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+  /admin/tasks:
+    get:
+      summary: List all local tasks
+      operationId: adminListTasks
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Tasks, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    post:
+      summary: Create an audited task reward definition
+      operationId: adminCreateTask
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TaskInput'}}}}
+      responses: {'201': {description: Task, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/tasks/{task_id}:
+    patch:
+      summary: Replace an audited task reward definition
+      operationId: adminUpdateTask
+      security: [{bearerAuth: []}]
+      parameters: [{name: task_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TaskInput'}}}}
+      responses: {'200': {description: Task, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/users/{user_id}/tasks/{task_id}/award:
+    post:
+      summary: Award a server/admin-verified task period exactly once
+      operationId: adminAwardTask
+      security: [{bearerAuth: []}]
+      parameters: [{name: user_id, in: path, required: true, schema: {type: string}}, {name: task_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [claim_key], properties: {claim_key: {type: string, minLength: 1, maxLength: 128}, reason: {type: string, maxLength: 500}}}}}}
+      responses: {'200': {description: Award or idempotent replay, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/avatar-frames:
+    get:
+      summary: List all avatar frames
+      operationId: adminListAvatarFrames
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Frames, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    post:
+      summary: Create an audited avatar frame
+      operationId: adminCreateAvatarFrame
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FrameInput'}}}}
+      responses: {'201': {description: Frame, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/avatar-frames/{frame_id}:
+    patch:
+      summary: Replace an audited avatar frame definition
+      operationId: adminUpdateAvatarFrame
+      security: [{bearerAuth: []}]
+      parameters: [{name: frame_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FrameInput'}}}}
+      responses: {'200': {description: Frame, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/users/{user_id}/avatar-frames/{frame_id}:
+    post:
+      summary: Grant an avatar-frame entitlement with an immutable audit event
+      operationId: adminGrantAvatarFrame
+      security: [{bearerAuth: []}]
+      parameters: [{name: user_id, in: path, required: true, schema: {type: string}}, {name: frame_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {reason: {type: string, maxLength: 500}}}}}}
+      responses: {'200': {description: Entitlement, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /admin/users/{user_id}/points:
+    post:
+      summary: Grant award-only local points with idempotency and audit
+      operationId: adminGrantLocalPoints
+      security: [{bearerAuth: []}]
+      parameters: [{name: user_id, in: path, required: true, schema: {type: string}}, {$ref: '#/components/parameters/RequiredIdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [amount, description], properties: {amount: {type: integer, minimum: 1, maximum: 100000}, description: {type: string, minLength: 1, maxLength: 200}}}}}}
+      responses: {'200': {description: Award or idempotent replay, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
 components:
   securitySchemes:
     bearerAuth:
@@ -1099,6 +1376,7 @@ components:
     Cursor: {name: cursor, in: query, schema: {type: string}, description: Opaque cursor returned by page.next_cursor.}
     Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 20}}
     IdempotencyKey: {name: Idempotency-Key, in: header, required: false, schema: {type: string, maxLength: 128}}
+    RequiredIdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
   responses:
     Session:
       description: Authenticated device session
@@ -1131,6 +1409,54 @@ components:
       description: Private message
       content: {application/json: {schema: {$ref: '#/components/schemas/MessageEnvelope'}}}
   schemas:
+    ProductTypeInput:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: {type: string, pattern: '^[a-z0-9]+(?:[-_][a-z0-9]+)*$', minLength: 2, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 80}
+        status: {type: string, enum: [active, archived], default: active}
+        reason: {type: string, maxLength: 500}
+    ProductInput:
+      type: object
+      required: [type_id, sku, name]
+      properties:
+        type_id: {type: string}
+        sku: {type: string, pattern: '^[a-z0-9]+(?:[-_][a-z0-9]+)*$', minLength: 2, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 2000}
+        inventory: {type: integer, minimum: 0, maximum: 1000000}
+        status: {type: string, enum: [draft, active, archived], default: draft}
+        reason: {type: string, maxLength: 500}
+    OrderTransitionInput:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [cancelled, fulfilled]}
+        fulfillment_carrier: {type: string, maxLength: 100}
+        tracking_code: {type: string, maxLength: 200}
+        reason: {type: string, maxLength: 500}
+    TaskInput:
+      type: object
+      required: [code, name, repeat_policy]
+      properties:
+        code: {type: string, pattern: '^[a-z0-9]+(?:[-_][a-z0-9]+)*$', minLength: 2, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 1000}
+        repeat_policy: {type: string, enum: [once, daily]}
+        reward_points: {type: integer, minimum: 0, maximum: 100000}
+        reward_frame_id: {type: string}
+        status: {type: string, enum: [active, archived], default: active}
+        reason: {type: string, maxLength: 500}
+    FrameInput:
+      type: object
+      required: [slug, name, image_url]
+      properties:
+        slug: {type: string, pattern: '^[a-z0-9]+(?:[-_][a-z0-9]+)*$', minLength: 2, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 100}
+        image_url: {type: string, minLength: 1, maxLength: 500}
+        status: {type: string, enum: [active, archived], default: active}
+        reason: {type: string, maxLength: 500}
     Meta:
       type: object
       required: [request_id]

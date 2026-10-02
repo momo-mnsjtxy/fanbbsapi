@@ -10,6 +10,7 @@ import (
 
 	"fanbbs.local/backend/internal/blob"
 	"fanbbs.local/backend/internal/capabilities"
+	"fanbbs.local/backend/internal/commerce"
 	"fanbbs.local/backend/internal/community"
 	"fanbbs.local/backend/internal/identity"
 	"fanbbs.local/backend/internal/platform"
@@ -20,6 +21,7 @@ type App struct {
 	DB        *sql.DB
 	Identity  *identity.Service
 	Community *community.Service
+	Commerce  *commerce.Service
 	Handler   http.Handler
 }
 
@@ -34,6 +36,7 @@ func New(db *sql.DB) *App {
 func NewWithBlob(db *sql.DB, blobs blob.Store) *App {
 	identityService := identity.NewService(db)
 	communityService := community.NewService(db, blobs)
+	commerceService := commerce.NewService(db)
 	router := chi.NewRouter()
 	router.Use(platform.RequestIDMiddleware)
 	router.Use(platform.RecoverMiddleware)
@@ -59,7 +62,11 @@ func NewWithBlob(db *sql.DB, blobs blob.Store) *App {
 			communityRoutes.Use(identityService.OptionalAuth)
 			communityRoutes.Mount("/", communityService.Routes(identityService))
 		})
+		api.Group(func(commerceRoutes chi.Router) {
+			commerceRoutes.Use(identityService.OptionalAuth)
+			commerceService.RegisterRoutes(commerceRoutes, identityService)
+		})
 	})
 
-	return &App{DB: db, Identity: identityService, Community: communityService, Handler: router}
+	return &App{DB: db, Identity: identityService, Community: communityService, Commerce: commerceService, Handler: router}
 }
