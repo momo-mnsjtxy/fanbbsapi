@@ -192,7 +192,7 @@ func (c *rebindingConn) IsValid() bool {
 // query between SQLite and PostgreSQL.
 func postgresQuery(query string) string {
 	query = strings.ReplaceAll(query, "group_concat(", "string_agg(")
-	query = strings.ReplaceAll(query, "char(", "chr(")
+	query = strings.ReplaceAll(query, " char(", " chr(")
 	query = strings.ReplaceAll(query, "u.rowid", "u.sequence")
 	query = strings.ReplaceAll(query, "SELECT rowid,", "SELECT sequence,")
 
