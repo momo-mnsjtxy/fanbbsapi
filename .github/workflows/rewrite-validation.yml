@@ -58,6 +58,7 @@ jobs:
         env:
           SOURCE_DSN: postgres://fanbbs:fanbbs_test_password@127.0.0.1:5432/fanbbs_test?sslmode=disable
           RESTORE_DSN: postgres://fanbbs:fanbbs_test_password@127.0.0.1:5432/fanbbs_restore?sslmode=disable
+          FANBBS_PG_CLIENT_CONTAINER: postgres:17
         run: |
           go run ./cmd/migrate -driver sqlite -database-url "$RUNNER_TEMP/backup-source.db"
           scripts/rehearse_backup_restore.sh sqlite "$RUNNER_TEMP/backup-source.db" "$RUNNER_TEMP/sqlite-restore"

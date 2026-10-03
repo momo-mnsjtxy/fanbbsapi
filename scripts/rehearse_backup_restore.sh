@@ -30,12 +30,20 @@ case "$driver" in
     work_dir=$4
     mkdir -p "$work_dir"
     backup="$work_dir/fanbbs.postgres.dump"
-    pg_dump --format=custom --no-owner --no-acl --dbname="$source_dsn" --file="$backup"
-    pg_restore --clean --if-exists --no-owner --no-acl --dbname="$restore_dsn" "$backup"
-    source_versions=$(psql "$source_dsn" -XAtqc 'SELECT COUNT(*) FROM schema_migrations;')
-    restored_versions=$(psql "$restore_dsn" -XAtqc 'SELECT COUNT(*) FROM schema_migrations;')
+    if [ -n "${FANBBS_PG_CLIENT_CONTAINER:-}" ]; then
+      docker run --rm --network host -v "$work_dir:/backup" "$FANBBS_PG_CLIENT_CONTAINER" pg_dump --format=custom --no-owner --no-acl --dbname="$source_dsn" --file=/backup/fanbbs.postgres.dump
+      docker run --rm --network host -v "$work_dir:/backup" "$FANBBS_PG_CLIENT_CONTAINER" pg_restore --clean --if-exists --no-owner --no-acl --dbname="$restore_dsn" /backup/fanbbs.postgres.dump
+      source_versions=$(docker run --rm --network host "$FANBBS_PG_CLIENT_CONTAINER" psql "$source_dsn" -XAtqc 'SELECT COUNT(*) FROM schema_migrations;')
+      restored_versions=$(docker run --rm --network host "$FANBBS_PG_CLIENT_CONTAINER" psql "$restore_dsn" -XAtqc 'SELECT COUNT(*) FROM schema_migrations;')
+      restored_users=$(docker run --rm --network host "$FANBBS_PG_CLIENT_CONTAINER" psql "$restore_dsn" -XAtqc 'SELECT COUNT(*) FROM users;')
+    else
+      pg_dump --format=custom --no-owner --no-acl --dbname="$source_dsn" --file="$backup"
+      pg_restore --clean --if-exists --no-owner --no-acl --dbname="$restore_dsn" "$backup"
+      source_versions=$(psql "$source_dsn" -XAtqc 'SELECT COUNT(*) FROM schema_migrations;')
+      restored_versions=$(psql "$restore_dsn" -XAtqc 'SELECT COUNT(*) FROM schema_migrations;')
+      restored_users=$(psql "$restore_dsn" -XAtqc 'SELECT COUNT(*) FROM users;')
+    fi
     [ "$source_versions" = "$restored_versions" ]
-    restored_users=$(psql "$restore_dsn" -XAtqc 'SELECT COUNT(*) FROM users;')
     printf 'postgres backup/restore verified: %s migrations, %s synthetic users\n' "$restored_versions" "$restored_users"
     ;;
   *) usage ;;
