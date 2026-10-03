@@ -2,6 +2,8 @@ package legacyimport_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -11,12 +13,18 @@ import (
 
 func openDB(t *testing.T, name string) *legacyimport.Importer {
 	t.Helper()
+	db := openRawDB(t, name)
+	return legacyimport.New(db)
+}
+
+func openRawDB(t *testing.T, name string) *sql.DB {
+	t.Helper()
 	db, err := platform.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), name))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return legacyimport.New(db)
+	return db
 }
 
 func fixture() legacyimport.Document {
@@ -90,5 +98,140 @@ func TestImporterRefusesNonSyntheticSources(t *testing.T) {
 	document.Source = "production"
 	if _, err := openDB(t, "refuse.db").Import(context.Background(), document); err == nil {
 		t.Fatal("importer accepted a non-synthetic source")
+	}
+}
+
+func TestImporterRefusesDuplicateSourceIDsBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	db := openRawDB(t, "duplicate-ids.db")
+	document := fixture()
+	document.Posts = append(document.Posts, document.Posts[0])
+	if _, err := legacyimport.New(db).Import(ctx, document); err == nil {
+		t.Fatal("importer accepted ambiguous duplicate source IDs")
+	}
+	for _, table := range []string{"users", "posts", "legacy_import_runs", "legacy_quarantine"} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("duplicate-ID rejection left %d rows in %s", count, table)
+		}
+	}
+}
+
+func TestSyntheticImportRehearsalReportsAndRollsBack(t *testing.T) {
+	ctx := context.Background()
+	db := openRawDB(t, "rehearsal.db")
+	importer := legacyimport.New(db)
+	document := fixture()
+	before, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := importer.Rehearse(ctx, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rehearsal mutated source document: before=%s after=%s", before, after)
+	}
+	if !report.DryRun || report.Replayed {
+		t.Fatalf("unexpected rehearsal flags: %#v", report)
+	}
+	if report.Users.Imported != 2 || report.Posts.Imported != 1 || report.Comments.Imported != 2 {
+		t.Fatalf("rehearsal did not execute full mapping: %#v", report)
+	}
+	for _, table := range []string{"users", "posts", "comments", "legacy_import_runs", "legacy_quarantine"} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("rehearsal committed %d rows to %s", count, table)
+		}
+	}
+
+	committed, err := importer.Import(ctx, fixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.DryRun || committed.Replayed || committed.RunID != report.RunID || committed.SourceHash != report.SourceHash {
+		t.Fatalf("commit after rehearsal is inconsistent: rehearsal=%#v committed=%#v", report, committed)
+	}
+}
+
+func TestSyntheticImportQuarantinesTargetConflictsWithoutAborting(t *testing.T) {
+	ctx := context.Background()
+	db := openRawDB(t, "conflicts.db")
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO users(id, handle, email, password_hash, display_name, role, status, created_at, updated_at)
+		VALUES ('existing', 'legacy_alice', 'existing@example.test', 'disabled', 'Existing', 'member', 'active', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := legacyimport.New(db).Import(ctx, fixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Users != (legacyimport.Counts{Read: 2, Imported: 1, Quarantined: 1}) {
+		t.Fatalf("unexpected user conflict reconciliation: %#v", report.Users)
+	}
+	if report.Reasons["target_conflict"] != 1 || report.Reasons["orphan_post_author"] != 3 {
+		t.Fatalf("unexpected conflict cascade: %#v", report.Reasons)
+	}
+	for name, counts := range map[string]legacyimport.Counts{
+		"users": report.Users, "taxonomy": report.Taxonomy, "posts": report.Posts,
+		"comments": report.Comments, "follows": report.Follows, "media": report.Media,
+	} {
+		if counts.Read != counts.Imported+counts.Quarantined {
+			t.Fatalf("%s counts do not reconcile: %#v", name, counts)
+		}
+	}
+	var quarantined int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_quarantine WHERE run_id = ?`, report.RunID).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	wantQuarantined := report.Users.Quarantined + report.Taxonomy.Quarantined + report.Posts.Quarantined + report.Comments.Quarantined + report.Follows.Quarantined + report.Media.Quarantined
+	if quarantined != wantQuarantined {
+		t.Fatalf("quarantine rows=%d, want %d", quarantined, wantQuarantined)
+	}
+}
+
+func TestSyntheticImportRehearsalRollsBackOnFailure(t *testing.T) {
+	ctx := context.Background()
+	db := openRawDB(t, "failed-rehearsal.db")
+	if _, err := db.ExecContext(ctx, `
+		CREATE TRIGGER reject_rehearsal_post BEFORE INSERT ON posts
+		BEGIN SELECT RAISE(ABORT, 'forced rehearsal failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	document := legacyimport.Document{
+		Source: "synthetic", MappingVersion: 1,
+		Users: []legacyimport.LegacyUser{{
+			ID: "rehearsal-user", Handle: "rehearsal_user", Email: "rehearsal@example.test",
+			DisplayName: "Rehearsal", Role: "member", Status: "active",
+		}},
+		Posts: []legacyimport.LegacyPost{
+			{ID: "a-paid", AuthorID: "rehearsal-user", Kind: "article", Title: "Paid", Body: "Quarantine first", Status: "publish", Paid: true},
+			{ID: "z-valid", AuthorID: "rehearsal-user", Kind: "article", Title: "Valid", Body: "Trigger failure", Status: "publish"},
+		},
+	}
+	if _, err := legacyimport.New(db).Rehearse(ctx, document); err == nil {
+		t.Fatal("rehearsal unexpectedly succeeded")
+	}
+	for _, table := range []string{"users", "posts", "legacy_import_runs", "legacy_quarantine"} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("failed rehearsal left %d rows in %s", count, table)
+		}
 	}
 }

@@ -118,6 +118,21 @@ func TestPostgresAdapterAndSyntheticMigrationRehearsal(t *testing.T) {
 	if err != nil || !replay.Replayed || replay.RunID != report.RunID {
 		t.Fatalf("import replay=%#v err=%v", replay, err)
 	}
+	conflict, err := importer.Import(ctx, targetConflictFixture())
+	if err != nil {
+		t.Fatalf("PostgreSQL target conflict aborted import transaction: %v", err)
+	}
+	if conflict.Users != (legacyimport.Counts{Read: 1, Quarantined: 1}) || conflict.Reasons["target_conflict"] != 1 {
+		t.Fatalf("unexpected PostgreSQL target conflict reconciliation: %#v", conflict)
+	}
+	rehearsalBefore := tableCounts(t, ctx, db)
+	rehearsal, err := importer.Rehearse(ctx, syntheticFixture("dryrun"))
+	if err != nil || !rehearsal.DryRun || rehearsal.Replayed {
+		t.Fatalf("PostgreSQL dry-run rehearsal=%#v err=%v", rehearsal, err)
+	}
+	if rehearsalAfter := tableCounts(t, ctx, db); rehearsalAfter != rehearsalBefore {
+		t.Fatalf("PostgreSQL dry-run committed rows: before=%#v after=%#v", rehearsalBefore, rehearsalAfter)
+	}
 
 	before := tableCounts(t, ctx, db)
 	if _, err := db.ExecContext(ctx, `
@@ -198,5 +213,15 @@ func rollbackFixture() legacyimport.Document {
 			{ID: "a-paid", AuthorID: "rollback-user", Kind: "article", Title: "Quarantine before failure", Body: "Disabled", Status: "publish", Paid: true},
 			{ID: "z-valid", AuthorID: "rollback-user", Kind: "article", Title: "Trigger rollback", Body: "Must not persist", Status: "publish"},
 		},
+	}
+}
+
+func targetConflictFixture() legacyimport.Document {
+	return legacyimport.Document{
+		Source: "synthetic", MappingVersion: 1,
+		Users: []legacyimport.LegacyUser{{
+			ID: "target-conflict-user", Handle: "pg_alice", Email: "target-conflict@example.test",
+			DisplayName: "Target Conflict", Role: "member", Status: "active",
+		}},
 	}
 }

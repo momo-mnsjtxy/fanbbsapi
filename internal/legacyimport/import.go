@@ -95,6 +95,7 @@ type Report struct {
 	RunID      string         `json:"run_id"`
 	SourceHash string         `json:"source_hash"`
 	Replayed   bool           `json:"replayed"`
+	DryRun     bool           `json:"dry_run,omitempty"`
 	Users      Counts         `json:"users"`
 	Taxonomy   Counts         `json:"taxonomy"`
 	Posts      Counts         `json:"posts"`
@@ -114,8 +115,23 @@ func New(db *sql.DB) *Importer { return &Importer{db: db, now: time.Now} }
 var handlePattern = regexp.MustCompile(`^[a-z0-9_]{3,24}$`)
 
 func (importer *Importer) Import(ctx context.Context, document Document) (Report, error) {
+	return importer.run(ctx, document, false)
+}
+
+// Rehearse executes the complete import in a transaction and then rolls it
+// back. It is intended to expose target conflicts and reconciliation counts
+// without committing application, run, or quarantine rows. PostgreSQL sequence
+// values are not transactional, so a rehearsal may leave harmless sequence gaps.
+func (importer *Importer) Rehearse(ctx context.Context, document Document) (Report, error) {
+	return importer.run(ctx, document, true)
+}
+
+func (importer *Importer) run(ctx context.Context, document Document, dryRun bool) (Report, error) {
 	if document.Source != "synthetic" || document.MappingVersion != 1 {
 		return Report{}, fmt.Errorf("refusing import: source must be synthetic and mapping_version must be 1")
+	}
+	if err := validateUniqueIDs(document); err != nil {
+		return Report{}, err
 	}
 	canonical := canonicalDocument(document)
 	encoded, err := json.Marshal(canonical)
@@ -133,6 +149,7 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			return Report{}, fmt.Errorf("decode prior import report: %w", err)
 		}
 		report.Replayed = true
+		report.DryRun = dryRun
 		return report, nil
 	}
 	if err != sql.ErrNoRows {
@@ -140,7 +157,7 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 	}
 
 	report := Report{
-		RunID: runID, SourceHash: sourceHash, Reasons: map[string]int{},
+		RunID: runID, SourceHash: sourceHash, DryRun: dryRun, Reasons: map[string]int{},
 		Users: Counts{Read: len(canonical.Users)}, Taxonomy: Counts{Read: len(canonical.Taxonomy)},
 		Posts: Counts{Read: len(canonical.Posts)}, Comments: Counts{Read: len(canonical.Comments)},
 		Follows: Counts{Read: len(canonical.Follows)}, Media: Counts{Read: len(canonical.Media)},
@@ -176,12 +193,24 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			report.Users.Quarantined++
 			continue
 		}
+		// Source-level identity collisions must stay deterministic even when the
+		// first row also conflicts with data already present in the target.
+		handles[strings.ToLower(user.Handle)] = true
+		emails[strings.ToLower(user.Email)] = true
 		newID := deterministicID("usr", user.ID)
 		created := normalizedTime(user.CreatedAt)
-		_, err := tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			INSERT INTO users(id, handle, email, password_hash, display_name, bio, role, status, created_at, updated_at)
-			VALUES (?, ?, ?, 'legacy-login-disabled', ?, ?, ?, ?, ?, ?)`, newID, user.Handle, user.Email, fallback(user.DisplayName, user.Handle), user.Bio, role, status, created, created)
+			VALUES (?, ?, ?, 'legacy-login-disabled', ?, ?, ?, ?, ?, ?)
+			ON CONFLICT DO NOTHING`, newID, user.Handle, user.Email, fallback(user.DisplayName, user.Handle), user.Bio, role, status, created, created)
 		if err != nil {
+			return Report{}, fmt.Errorf("insert synthetic user %s: %w", user.ID, err)
+		}
+		inserted, err := exactlyOneRow(result)
+		if err != nil {
+			return Report{}, fmt.Errorf("inspect synthetic user insert %s: %w", user.ID, err)
+		}
+		if !inserted {
 			if err := importer.quarantine(ctx, tx, report.RunID, "user", user.ID, "target_conflict", user, &report, now); err != nil {
 				return Report{}, err
 			}
@@ -189,8 +218,6 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			continue
 		}
 		userIDs[user.ID] = newID
-		handles[strings.ToLower(user.Handle)] = true
-		emails[strings.ToLower(user.Email)] = true
 		report.Users.Imported++
 	}
 
@@ -213,6 +240,7 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			report.Taxonomy.Quarantined++
 			continue
 		}
+		slugs[key] = true
 		prefix := "cat"
 		table := "categories"
 		if taxonomy.Kind == "tag" {
@@ -227,8 +255,15 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			values += `, ?`
 			args = append(args, now)
 		}
-		_, err := tx.ExecContext(ctx, query+`)`+values+`)`, args...)
+		result, err := tx.ExecContext(ctx, query+`)`+values+`) ON CONFLICT DO NOTHING`, args...)
 		if err != nil {
+			return Report{}, fmt.Errorf("insert synthetic taxonomy %s: %w", taxonomy.ID, err)
+		}
+		inserted, err := exactlyOneRow(result)
+		if err != nil {
+			return Report{}, fmt.Errorf("inspect synthetic taxonomy insert %s: %w", taxonomy.ID, err)
+		}
+		if !inserted {
 			if err := importer.quarantine(ctx, tx, runID, "taxonomy", taxonomy.ID, "target_conflict", taxonomy, &report, now); err != nil {
 				return Report{}, err
 			}
@@ -240,7 +275,6 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 		} else {
 			tagIDs[taxonomy.ID] = newID
 		}
-		slugs[key] = true
 		report.Taxonomy.Imported++
 	}
 	postIDs := map[string]string{}
@@ -289,11 +323,23 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			category = categoryID
 		}
 		created := normalizedTime(post.CreatedAt)
-		_, err := tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			INSERT INTO posts(id, author_id, kind, title, body, category_id, status, visibility, created_at, published_at)
-			VALUES (?, ?, ?, ?, ?, ?, 'published', 'public', ?, ?)`, newID, authorID, post.Kind, post.Title, post.Body, category, created, created)
+			VALUES (?, ?, ?, ?, ?, ?, 'published', 'public', ?, ?)
+			ON CONFLICT DO NOTHING`, newID, authorID, post.Kind, post.Title, post.Body, category, created, created)
 		if err != nil {
 			return Report{}, fmt.Errorf("insert synthetic post %s: %w", post.ID, err)
+		}
+		inserted, err := exactlyOneRow(result)
+		if err != nil {
+			return Report{}, fmt.Errorf("inspect synthetic post insert %s: %w", post.ID, err)
+		}
+		if !inserted {
+			if err := importer.quarantine(ctx, tx, runID, "post", post.ID, "target_conflict", post, &report, now); err != nil {
+				return Report{}, err
+			}
+			report.Posts.Quarantined++
+			continue
 		}
 		for _, tagID := range resolvedTagIDs {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO post_tags(post_id, tag_id) VALUES (?, ?)`, newID, tagID); err != nil {
@@ -320,7 +366,15 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			report.Follows.Quarantined++
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO follows(follower_id, followed_id, created_at) VALUES (?, ?, ?)`, followerID, followedID, normalizedTime(follow.CreatedAt)); err != nil {
+		result, err := tx.ExecContext(ctx, `INSERT INTO follows(follower_id, followed_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`, followerID, followedID, normalizedTime(follow.CreatedAt))
+		if err != nil {
+			return Report{}, fmt.Errorf("insert synthetic follow %s: %w", follow.ID, err)
+		}
+		inserted, err := exactlyOneRow(result)
+		if err != nil {
+			return Report{}, fmt.Errorf("inspect synthetic follow insert %s: %w", follow.ID, err)
+		}
+		if !inserted {
 			if err := importer.quarantine(ctx, tx, runID, "follow", follow.ID, "target_conflict", follow, &report, now); err != nil {
 				return Report{}, err
 			}
@@ -393,10 +447,22 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 			if rootID != "" {
 				root = rootID
 			}
-			_, err := tx.ExecContext(ctx, `INSERT INTO comments(id, post_id, author_id, parent_id, root_id, depth, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			result, err := tx.ExecContext(ctx, `INSERT INTO comments(id, post_id, author_id, parent_id, root_id, depth, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 				newID, postID, authorID, parent, root, depth, comment.Body, normalizedTime(comment.CreatedAt))
 			if err != nil {
 				return Report{}, fmt.Errorf("insert synthetic comment %s: %w", comment.ID, err)
+			}
+			inserted, err := exactlyOneRow(result)
+			if err != nil {
+				return Report{}, fmt.Errorf("inspect synthetic comment insert %s: %w", comment.ID, err)
+			}
+			if !inserted {
+				if err := importer.quarantine(ctx, tx, runID, "comment", comment.ID, "target_conflict", comment, &report, now); err != nil {
+					return Report{}, err
+				}
+				report.Comments.Quarantined++
+				progress = true
+				continue
 			}
 			commentIDs[comment.ID] = newID
 			commentDepth[comment.ID] = depth
@@ -422,6 +488,7 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 	}
 	stored := report
 	stored.Replayed = false
+	stored.DryRun = false
 	reportJSON, err := json.Marshal(stored)
 	if err != nil {
 		return Report{}, fmt.Errorf("encode import report: %w", err)
@@ -429,10 +496,59 @@ func (importer *Importer) Import(ctx context.Context, document Document) (Report
 	if _, err := tx.ExecContext(ctx, `UPDATE legacy_import_runs SET report_json = ? WHERE id = ?`, string(reportJSON), runID); err != nil {
 		return Report{}, fmt.Errorf("save import report: %w", err)
 	}
+	if dryRun {
+		if err := tx.Rollback(); err != nil {
+			return Report{}, fmt.Errorf("roll back synthetic import rehearsal: %w", err)
+		}
+		return report, nil
+	}
 	if err := tx.Commit(); err != nil {
 		return Report{}, fmt.Errorf("commit synthetic import: %w", err)
 	}
 	return report, nil
+}
+
+func validateUniqueIDs(document Document) error {
+	groups := []struct {
+		name string
+		ids  []string
+	}{
+		{name: "user", ids: collectIDs(len(document.Users), func(index int) string { return document.Users[index].ID })},
+		{name: "taxonomy", ids: collectIDs(len(document.Taxonomy), func(index int) string { return document.Taxonomy[index].ID })},
+		{name: "post", ids: collectIDs(len(document.Posts), func(index int) string { return document.Posts[index].ID })},
+		{name: "comment", ids: collectIDs(len(document.Comments), func(index int) string { return document.Comments[index].ID })},
+		{name: "follow", ids: collectIDs(len(document.Follows), func(index int) string { return document.Follows[index].ID })},
+		{name: "media", ids: collectIDs(len(document.Media), func(index int) string { return document.Media[index].ID })},
+	}
+	for _, group := range groups {
+		seen := map[string]bool{}
+		for _, id := range group.ids {
+			if id == "" {
+				continue
+			}
+			if seen[id] {
+				return fmt.Errorf("refusing import: duplicate %s id %q", group.name, id)
+			}
+			seen[id] = true
+		}
+	}
+	return nil
+}
+
+func collectIDs(count int, idAt func(int) string) []string {
+	ids := make([]string, count)
+	for index := range ids {
+		ids[index] = idAt(index)
+	}
+	return ids
+}
+
+func exactlyOneRow(result sql.Result) (bool, error) {
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return changed == 1, nil
 }
 
 func (importer *Importer) quarantine(ctx context.Context, tx *sql.Tx, runID, entityType, legacyID, reason string, source any, report *Report, now string) error {
@@ -453,6 +569,18 @@ func (importer *Importer) quarantine(ctx context.Context, tx *sql.Tx, runID, ent
 }
 
 func canonicalDocument(document Document) Document {
+	// A caller may reuse the decoded document for a dry run followed by a real
+	// import. Canonicalization must therefore own every slice it sorts or
+	// deduplicates rather than mutating the caller's source snapshot.
+	document.Users = append([]LegacyUser(nil), document.Users...)
+	document.Taxonomy = append([]LegacyTaxonomy(nil), document.Taxonomy...)
+	document.Posts = append([]LegacyPost(nil), document.Posts...)
+	document.Comments = append([]LegacyComment(nil), document.Comments...)
+	document.Follows = append([]LegacyFollow(nil), document.Follows...)
+	document.Media = append([]LegacyMediaReference(nil), document.Media...)
+	for index := range document.Posts {
+		document.Posts[index].TagIDs = append([]string(nil), document.Posts[index].TagIDs...)
+	}
 	sort.Slice(document.Users, func(i, j int) bool { return document.Users[i].ID < document.Users[j].ID })
 	sort.Slice(document.Taxonomy, func(i, j int) bool { return document.Taxonomy[i].ID < document.Taxonomy[j].ID })
 	sort.Slice(document.Posts, func(i, j int) bool { return document.Posts[i].ID < document.Posts[j].ID })

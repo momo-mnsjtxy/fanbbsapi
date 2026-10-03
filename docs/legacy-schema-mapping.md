@@ -16,6 +16,16 @@ declared with:
 It has no legacy MySQL reader and never fetches a media URL. The authentic-row
 adapter is a testable schema map, not approval to process a real snapshot.
 
+Pass `--dry-run` to execute the complete importer against a migrated target and
+roll back application, run and quarantine rows after producing reconciliation
+counts. This catches target identity/taxonomy/content conflicts through the same
+mapping path used by a committed rehearsal. PostgreSQL sequences are
+non-transactional and can advance during a dry run, so use a disposable clone
+when sequence gaps matter. Fixture decoding is strict and rejects unknown
+fields or trailing JSON documents before the target database is opened.
+Ambiguous duplicate source IDs are rejected before an import transaction is
+started, and canonical hashing does not mutate the decoded snapshot.
+
 | Original table/columns | Local target | Implemented handling |
 |---|---|---|
 | `${prefix}_users`: `uid`, `name`, `screenName`, `password`, `mail`, `introduce`, `avatar`, `status`, `group`, `created` | `users` | Deterministic IDs; supported groups map to member/moderator/admin; status 0/1 maps to suspended/active; invalid handles receive a deterministic `legacy_<uid>` handle while the visible name is preserved; bio and Unix creation time are mapped |
