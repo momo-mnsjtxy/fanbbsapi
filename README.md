@@ -53,6 +53,8 @@ Configuration:
 | `FANBBS_MEDIA_RETENTION` | `24h` | Minimum age for the one-shot worker to expire unattached media |
 | `FANBBS_MEDIA_CLEANUP_LIMIT` | `100` | Maximum candidates and queued blob deletes per worker pass (1–1000) |
 
+Secret-free environment and reverse-proxy examples live under `deploy/`. They are templates only; inject the PostgreSQL URL from the deployment platform's secret store and keep metrics private.
+
 The optional seed contains local test identities used by the integration suite. They are development fixtures only. Set `FANBBS_SEED_DEMO=false` outside local development; production guidance never relies on seeded credentials.
 
 PostgreSQL startup and the migration-only command use the same adapter:
@@ -70,6 +72,8 @@ FANBBS_DB=fanbbs.db FANBBS_BLOB_DIR=data/blobs go run ./cmd/worker
 ```
 
 PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `010`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
+
+The CI workflow also creates logical SQLite and PostgreSQL backups from synthetic databases, restores both into separate targets, and compares migration integrity. See `docs/operations.md` and `scripts/rehearse_backup_restore.sh`; the script has no production target or credentials built in.
 
 ## Verify
 

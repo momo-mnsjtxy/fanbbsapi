@@ -54,6 +54,15 @@ jobs:
         env:
           FANBBS_TEST_POSTGRES_DSN: postgres://fanbbs:fanbbs_test_password@127.0.0.1:5432/fanbbs_test?sslmode=disable
         run: go test -count=1 -run TestPostgresAdapterAndSyntheticMigrationRehearsal -v ./internal/platform
+      - name: SQLite and PostgreSQL backup/restore rehearsal
+        env:
+          SOURCE_DSN: postgres://fanbbs:fanbbs_test_password@127.0.0.1:5432/fanbbs_test?sslmode=disable
+          RESTORE_DSN: postgres://fanbbs:fanbbs_test_password@127.0.0.1:5432/fanbbs_restore?sslmode=disable
+        run: |
+          go run ./cmd/migrate -driver sqlite -database-url "$RUNNER_TEMP/backup-source.db"
+          scripts/rehearse_backup_restore.sh sqlite "$RUNNER_TEMP/backup-source.db" "$RUNNER_TEMP/sqlite-restore"
+          PGPASSWORD=fanbbs_test_password createdb -h 127.0.0.1 -U fanbbs fanbbs_restore
+          scripts/rehearse_backup_restore.sh postgres "$SOURCE_DSN" "$RESTORE_DSN" "$RUNNER_TEMP/postgres-restore"
       - name: Validate OpenAPI graph
         run: |
           python3 -m pip install --disable-pip-version-check pyyaml==6.0.3
