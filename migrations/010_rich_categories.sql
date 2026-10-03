@@ -1,0 +1,3 @@
+ALTER TABLE categories ADD COLUMN description TEXT NOT NULL DEFAULT '';
+ALTER TABLE categories ADD COLUMN image_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE categories ADD COLUMN background_url TEXT NOT NULL DEFAULT '';

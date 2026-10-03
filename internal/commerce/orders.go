@@ -84,6 +84,56 @@ func loadOrderItems(ctx context.Context, q interface {
 	return items, rows.Err()
 }
 
+type orderReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func loadOrderShipping(ctx context.Context, q orderReader, orderID string) (*ShippingAddressSnapshot, error) {
+	var item ShippingAddressSnapshot
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(source_address_id,''),label,recipient_name,phone,region,address_line,postal_code FROM order_shipping_addresses WHERE order_id=?`, orderID).
+		Scan(&item.SourceAddressID, &item.Label, &item.RecipientName, &item.Phone, &item.Region, &item.AddressLine, &item.PostalCode)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func loadTrackingEvents(ctx context.Context, q orderReader, orderID string) ([]TrackingEvent, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id,status,description,location,occurred_at,created_at FROM order_tracking_events WHERE order_id=? ORDER BY occurred_at ASC,id ASC`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TrackingEvent{}
+	for rows.Next() {
+		var item TrackingEvent
+		if err := rows.Scan(&item.ID, &item.Status, &item.Description, &item.Location, &item.OccurredAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Source = "manual"
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func hydrateOrder(ctx context.Context, q orderReader, item *Order) error {
+	var err error
+	item.Items, err = loadOrderItems(ctx, q, item.ID)
+	if err != nil {
+		return err
+	}
+	item.ShippingAddress, err = loadOrderShipping(ctx, q, item.ID)
+	if err != nil {
+		return err
+	}
+	item.TrackingEvents, err = loadTrackingEvents(ctx, q, item.ID)
+	return err
+}
+
 func (s *Service) Order(ctx context.Context, orderID, userID string, admin bool) (Order, error) {
 	query := orderSelect + ` WHERE id=?`
 	args := []any{orderID}
@@ -98,7 +148,7 @@ func (s *Service) Order(ctx context.Context, orderID, userID string, admin bool)
 	if err != nil {
 		return Order{}, err
 	}
-	item.Items, err = loadOrderItems(ctx, s.db, item.ID)
+	err = hydrateOrder(ctx, s.db, &item)
 	return item, err
 }
 
@@ -136,8 +186,7 @@ func (s *Service) ListOrders(ctx context.Context, userID, status string, admin b
 		return nil, "", err
 	}
 	for i := range items {
-		items[i].Items, err = loadOrderItems(ctx, s.db, items[i].ID)
-		if err != nil {
+		if err = hydrateOrder(ctx, s.db, &items[i]); err != nil {
 			return nil, "", err
 		}
 	}
@@ -150,7 +199,12 @@ func (s *Service) ListOrders(ctx context.Context, userID, status string, admin b
 }
 
 func (s *Service) CreateOrder(ctx context.Context, userID, idempotencyKey string) (Order, bool, error) {
+	return s.CreateOrderWithAddress(ctx, userID, idempotencyKey, "")
+}
+
+func (s *Service) CreateOrderWithAddress(ctx context.Context, userID, idempotencyKey, addressID string) (Order, bool, error) {
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	addressID = strings.TrimSpace(addressID)
 	if idempotencyKey == "" || len(idempotencyKey) > 128 {
 		return Order{}, false, platform.Validation(map[string][]string{"idempotency_key": {"Idempotency-Key 必填且不能超过 128 个字符"}})
 	}
@@ -167,6 +221,22 @@ func (s *Service) CreateOrder(ctx context.Context, userID, idempotencyKey string
 		return item, true, loadErr
 	}
 	if err != sql.ErrNoRows {
+		return Order{}, false, err
+	}
+	var shipping *ShippingAddressSnapshot
+	addressQuery := `SELECT id,label,recipient_name,phone,region,address_line,postal_code FROM shipping_addresses WHERE user_id=? AND is_default=1`
+	addressArgs := []any{userID}
+	if addressID != "" {
+		addressQuery = `SELECT id,label,recipient_name,phone,region,address_line,postal_code FROM shipping_addresses WHERE user_id=? AND id=?`
+		addressArgs = append(addressArgs, addressID)
+	}
+	var snapshot ShippingAddressSnapshot
+	err = tx.QueryRowContext(ctx, addressQuery, addressArgs...).Scan(&snapshot.SourceAddressID, &snapshot.Label, &snapshot.RecipientName, &snapshot.Phone, &snapshot.Region, &snapshot.AddressLine, &snapshot.PostalCode)
+	if err == nil {
+		shipping = &snapshot
+	} else if err == sql.ErrNoRows && addressID != "" {
+		return Order{}, false, platform.Validation(map[string][]string{"address_id": {"收货地址不存在"}})
+	} else if err != sql.ErrNoRows {
 		return Order{}, false, err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT p.id,p.sku,p.name,p.inventory,p.status,t.status,c.quantity FROM cart_items c JOIN products p ON p.id=c.product_id JOIN product_types t ON t.id=p.type_id WHERE c.user_id=? ORDER BY p.id`, userID)
@@ -206,6 +276,12 @@ func (s *Service) CreateOrder(ctx context.Context, userID, idempotencyKey string
 	if _, err := tx.ExecContext(ctx, `INSERT INTO commerce_orders(id,user_id,status,created_at,updated_at) VALUES(?,?,'created',?,?)`, id, userID, stamp, stamp); err != nil {
 		return Order{}, false, err
 	}
+	if shipping != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO order_shipping_addresses(order_id,source_address_id,label,recipient_name,phone,region,address_line,postal_code) VALUES(?,?,?,?,?,?,?,?)`,
+			id, shipping.SourceAddressID, shipping.Label, shipping.RecipientName, shipping.Phone, shipping.Region, shipping.AddressLine, shipping.PostalCode); err != nil {
+			return Order{}, false, err
+		}
+	}
 	for _, item := range items {
 		result, err := tx.ExecContext(ctx, `UPDATE products SET inventory=inventory-?,version=version+1,updated_at=? WHERE id=? AND status='active' AND inventory>=?`, item.Quantity, stamp, item.ProductID, item.Quantity)
 		if err != nil {
@@ -228,7 +304,7 @@ func (s *Service) CreateOrder(ctx context.Context, userID, idempotencyKey string
 	if err := tx.Commit(); err != nil {
 		return Order{}, false, err
 	}
-	return Order{ID: id, UserID: userID, Status: "created", CreatedAt: stamp, UpdatedAt: stamp, Items: items}, false, nil
+	return Order{ID: id, UserID: userID, Status: "created", CreatedAt: stamp, UpdatedAt: stamp, Items: items, ShippingAddress: shipping, TrackingEvents: []TrackingEvent{}}, false, nil
 }
 
 type OrderTransitionInput struct {
@@ -273,8 +349,7 @@ func (s *Service) TransitionOrder(ctx context.Context, actor identity.User, requ
 	if err != nil {
 		return Order{}, false, err
 	}
-	before.Items, err = loadOrderItems(ctx, tx, orderID)
-	if err != nil {
+	if err = hydrateOrder(ctx, tx, &before); err != nil {
 		return Order{}, false, err
 	}
 	if before.Status == input.Status {
@@ -308,6 +383,18 @@ func (s *Service) TransitionOrder(ctx context.Context, actor identity.User, requ
 		after.FulfillmentCarrier = input.FulfillmentCarrier
 		after.TrackingCode = input.TrackingCode
 		_, err = tx.ExecContext(ctx, `UPDATE commerce_orders SET status='fulfilled',fulfillment_carrier=?,tracking_code=?,fulfilled_at=?,updated_at=? WHERE id=? AND status='created'`, input.FulfillmentCarrier, input.TrackingCode, stamp, stamp, orderID)
+		if err == nil {
+			trackingID, idErr := platform.NewID("trk")
+			if idErr != nil {
+				return Order{}, false, idErr
+			}
+			event := TrackingEvent{ID: trackingID, Status: "label_created", Description: "已记录手工承运信息", Source: "manual", OccurredAt: stamp, CreatedAt: stamp}
+			_, err = tx.ExecContext(ctx, `INSERT INTO order_tracking_events(id,order_id,status,description,location,occurred_at,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+				trackingID, orderID, event.Status, event.Description, "", stamp, actor.ID, stamp)
+			if err == nil {
+				after.TrackingEvents = append(after.TrackingEvents, event)
+			}
+		}
 	}
 	if err != nil {
 		return Order{}, false, err
@@ -316,7 +403,13 @@ func (s *Service) TransitionOrder(ctx context.Context, actor identity.User, requ
 	if input.Status == "fulfilled" {
 		action = "order_fulfill"
 	}
-	if err := insertAudit(ctx, tx, actor.ID, action, "order", orderID, before, after, input.Reason, requestID, now); err != nil {
+	// Address snapshots contain owner contact details. They are returned only
+	// through scoped order reads and are deliberately excluded from the generic
+	// immutable audit payload.
+	auditBefore, auditAfter := before, after
+	auditBefore.ShippingAddress, auditAfter.ShippingAddress = nil, nil
+	auditBefore.TrackingEvents, auditAfter.TrackingEvents = nil, nil
+	if err := insertAudit(ctx, tx, actor.ID, action, "order", orderID, auditBefore, auditAfter, input.Reason, requestID, now); err != nil {
 		return Order{}, false, err
 	}
 	if err := tx.Commit(); err != nil {

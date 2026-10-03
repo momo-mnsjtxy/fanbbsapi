@@ -6,17 +6,17 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 
 - Local registration, Argon2id credentials, opaque 15-minute access tokens, rotating 30-day refresh sessions, one-time local recovery codes (displayed once and hashed at rest), password/profile changes, soft deactivation, and server-side revocation
 - `recommend`/`recommended`, `latest`, `global`, and authenticated `following` feeds with opaque cursor pagination
-- Post create/detail, threaded comments/replies, idempotent post and comment creation
+- Post create/detail, thread-cursor comments/replies with complete depth-first pages and privacy-safe deleted-ancestor tombstones, and idempotent post/comment creation
 - Post/comment edit and soft delete with required `If-Match` versions, immutable owner-readable post revision history, and idempotent comment likes
 - Bounded local-filesystem media uploads behind a blob interface, post attachment, avatar upload/reference flow, owner-scoped abandonment, and retryable orphan expiry cleanup
 - Transaction-safe, idempotent like/unlike and repost/undo-repost operations
-- Idempotent bookmarks/follows, separate categories/tags, and viewer-aware search
+- Private owner-only bookmarks, explicit private/public curated collections with viewer-aware contents, idempotent follows, separate categories/tags, and viewer-aware search
 - Durable owner-scoped notifications, including private-message notifications, generated inside source transactions
 - Database-backed, membership-scoped private conversations and messages with sender idempotency, opaque cursors, monotonic read receipts, safe leave lifecycle, and HTTP polling checkpoints for reconnects
 - Public profiles/follower lists, block-aware visibility, category follows, category/tag feed filters, device-session management, and profile covers
 - Versioned local homepage/carousel operations configuration with `If-Match`, admin RBAC, media references, and immutable audit
 - Local non-payment product/type catalog administration, bounded integer inventory, owner carts, idempotent order creation with atomic reservation, and explicit `created`/`cancelled`/`fulfilled` lifecycle
-- Audited manual fulfillment metadata, exact-once cancellation inventory restoration, and owner-scoped order reads; orders contain no money, payment, wallet, or provider state
+- Owner-scoped shipping-address CRUD, immutable order address snapshots, audited manual fulfillment and append-only internal tracking timelines, exact-once cancellation inventory restoration, and owner-scoped order reads; orders contain no money, payment, wallet, live carrier, or provider state
 - UTC daily check-in, immutable award-only local points, admin-verified task rewards, threshold-derived levels/titles/ranks, and avatar-frame catalog/entitlement/selection with duplicate-award guards
 - Member reports, explicit pending-to-published/rejected post review, audited moderator/admin pin/recommend controls, filtered content review, admin user status controls with session revocation, audited category/tag CRUD, role checks, and immutable audit events
 - Privacy-safe owner activity history, bounded local rate limits for login and write-heavy endpoints, security response headers, structured request logs, and process-local `/metrics`
@@ -69,7 +69,7 @@ Run a bounded orphan-media cleanup pass (suitable for deployment cron):
 FANBBS_DB=fanbbs.db FANBBS_BLOB_DIR=data/blobs go run ./cmd/worker
 ```
 
-PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `008`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
+PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `010`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
 
 ## Verify
 
@@ -83,7 +83,7 @@ The integration suite uses a real temporary SQLite database and CI PostgreSQL 17
 
 It also covers upload MIME/ownership/visibility and public/private cache policy, avatar/cover references, device-session ownership/revocation, public-profile and block visibility, category follows/feed filters, monotonic read receipts and safe conversation leave, homepage version/audit rollback, stale post/comment writes, comment reactions, moderated counter/repost cleanup, and deterministic synthetic legacy import with quarantine/count reconciliation.
 
-The commerce/gamification integration cases cover admin RBAC, public catalog reads, bounded stock, cart ownership, idempotent checkout, atomic reservation, order masking, exact-once cancellation restoration, terminal fulfillment with audited tracking metadata, forced-audit rollback, duplicate UTC check-ins, immutable point events, admin-verified task awards, duplicate-award prevention, avatar-frame entitlement/selection and disabled payment/wallet/VIP/raffle/paid-content/external-fulfillment capabilities.
+The commerce/gamification integration cases cover admin RBAC, public catalog reads, bounded stock, cart ownership, address ownership/defaults, immutable order address snapshots, idempotent checkout, atomic reservation, order masking, exact-once cancellation restoration, terminal fulfillment with audited manual tracking metadata, immutable tracking events, forced-audit rollback, duplicate UTC check-ins, immutable point events, admin-verified task awards, duplicate-award prevention, avatar-frame entitlement/selection and disabled payment/wallet/VIP/raffle/paid-content/external-fulfillment capabilities.
 
 ## Synthetic migration rehearsal
 

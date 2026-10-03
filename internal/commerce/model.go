@@ -37,16 +37,52 @@ type OrderItem struct {
 }
 
 type Order struct {
-	ID                 string      `json:"id"`
-	UserID             string      `json:"user_id"`
-	Status             string      `json:"status"`
-	FulfillmentCarrier string      `json:"fulfillment_carrier"`
-	TrackingCode       string      `json:"tracking_code"`
-	CancelledAt        string      `json:"cancelled_at,omitempty"`
-	FulfilledAt        string      `json:"fulfilled_at,omitempty"`
-	CreatedAt          string      `json:"created_at"`
-	UpdatedAt          string      `json:"updated_at"`
-	Items              []OrderItem `json:"items"`
+	ID                 string                   `json:"id"`
+	UserID             string                   `json:"user_id"`
+	Status             string                   `json:"status"`
+	FulfillmentCarrier string                   `json:"fulfillment_carrier"`
+	TrackingCode       string                   `json:"tracking_code"`
+	CancelledAt        string                   `json:"cancelled_at,omitempty"`
+	FulfilledAt        string                   `json:"fulfilled_at,omitempty"`
+	CreatedAt          string                   `json:"created_at"`
+	UpdatedAt          string                   `json:"updated_at"`
+	Items              []OrderItem              `json:"items"`
+	ShippingAddress    *ShippingAddressSnapshot `json:"shipping_address,omitempty"`
+	TrackingEvents     []TrackingEvent          `json:"tracking_events"`
+}
+
+type ShippingAddress struct {
+	ID            string `json:"id"`
+	Label         string `json:"label"`
+	RecipientName string `json:"recipient_name"`
+	Phone         string `json:"phone"`
+	Region        string `json:"region"`
+	AddressLine   string `json:"address_line"`
+	PostalCode    string `json:"postal_code"`
+	Default       bool   `json:"is_default"`
+	Version       int    `json:"version"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+type ShippingAddressSnapshot struct {
+	SourceAddressID string `json:"source_address_id,omitempty"`
+	Label           string `json:"label"`
+	RecipientName   string `json:"recipient_name"`
+	Phone           string `json:"phone"`
+	Region          string `json:"region"`
+	AddressLine     string `json:"address_line"`
+	PostalCode      string `json:"postal_code"`
+}
+
+type TrackingEvent struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Description string `json:"description"`
+	Location    string `json:"location"`
+	Source      string `json:"source"`
+	OccurredAt  string `json:"occurred_at"`
+	CreatedAt   string `json:"created_at"`
 }
 
 type AvatarFrame struct {

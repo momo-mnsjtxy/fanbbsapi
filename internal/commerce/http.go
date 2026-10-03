@@ -19,11 +19,16 @@ func (s *Service) RegisterRoutes(r chi.Router, auth *identity.Service) {
 	r.Group(func(p chi.Router) {
 		p.Use(auth.RequireAuth)
 		p.Get("/me/cart", s.cartHTTP)
+		p.Get("/me/shipping-addresses", s.addressesHTTP)
+		p.Post("/me/shipping-addresses", s.createAddressHTTP)
+		p.Patch("/me/shipping-addresses/{addressID}", s.updateAddressHTTP)
+		p.Delete("/me/shipping-addresses/{addressID}", s.deleteAddressHTTP)
 		p.Put("/me/cart/{productID}", s.setCartHTTP)
 		p.Delete("/me/cart/{productID}", s.deleteCartHTTP)
 		p.Post("/orders", s.createOrderHTTP)
 		p.Get("/orders", s.ordersHTTP(false))
 		p.Get("/orders/{orderID}", s.orderHTTP(false))
+		p.Get("/orders/{orderID}/tracking", s.trackingHTTP)
 		p.Post("/orders/{orderID}/cancel", s.cancelOrderHTTP)
 		p.Post("/me/check-in", s.checkInHTTP)
 		p.Get("/me/gamification", s.gamificationHTTP)
@@ -43,6 +48,7 @@ func (s *Service) RegisterRoutes(r chi.Router, auth *identity.Service) {
 		p.With(auth.RequireRole("admin")).Get("/admin/orders", s.ordersHTTP(true))
 		p.With(auth.RequireRole("admin")).Get("/admin/orders/{orderID}", s.orderHTTP(true))
 		p.With(auth.RequireRole("admin")).Patch("/admin/orders/{orderID}", s.transitionOrderHTTP)
+		p.With(auth.RequireRole("admin")).Post("/admin/orders/{orderID}/tracking-events", s.addTrackingHTTP)
 		p.With(auth.RequireRole("admin")).Get("/admin/tasks", s.tasksHTTP(true))
 		p.With(auth.RequireRole("admin")).Post("/admin/tasks", s.createTaskHTTP)
 		p.With(auth.RequireRole("admin")).Patch("/admin/tasks/{taskID}", s.updateTaskHTTP)
@@ -217,7 +223,16 @@ func (s *Service) deleteCartHTTP(w http.ResponseWriter, r *http.Request) {
 	platform.WriteData(w, r, http.StatusOK, map[string]bool{"deleted": changed})
 }
 func (s *Service) createOrderHTTP(w http.ResponseWriter, r *http.Request) {
-	item, replayed, err := s.CreateOrder(r.Context(), currentUser(r).ID, r.Header.Get("Idempotency-Key"))
+	var input struct {
+		AddressID string `json:"address_id"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := platform.DecodeJSON(w, r, &input); err != nil {
+			platform.WriteError(w, r, err)
+			return
+		}
+	}
+	item, replayed, err := s.CreateOrderWithAddress(r.Context(), currentUser(r).ID, r.Header.Get("Idempotency-Key"), input.AddressID)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return

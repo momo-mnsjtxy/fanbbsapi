@@ -10,10 +10,13 @@ type Author struct {
 }
 
 type Category struct {
-	ID        string `json:"id"`
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	PostCount int    `json:"post_count,omitempty"`
+	ID            string `json:"id"`
+	Slug          string `json:"slug"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ImageURL      string `json:"image_url"`
+	BackgroundURL string `json:"background_url"`
+	PostCount     int    `json:"post_count,omitempty"`
 }
 
 type Tag struct {
@@ -69,19 +72,22 @@ type Post struct {
 }
 
 type Comment struct {
-	ID        string `json:"id"`
-	PostID    string `json:"post_id"`
-	ParentID  string `json:"parent_id,omitempty"`
-	RootID    string `json:"root_id,omitempty"`
-	Depth     int    `json:"depth"`
-	Body      string `json:"body"`
-	Content   string `json:"content"`
-	LikeCount int    `json:"like_count"`
-	Liked     bool   `json:"liked"`
-	Version   int    `json:"version"`
-	CreatedAt string `json:"created_at"`
-	Age       string `json:"age"`
-	Author    Author `json:"author"`
+	ID         string `json:"id"`
+	PostID     string `json:"post_id"`
+	ParentID   string `json:"parent_id,omitempty"`
+	RootID     string `json:"root_id,omitempty"`
+	ThreadID   string `json:"thread_id"`
+	Depth      int    `json:"depth"`
+	Body       string `json:"body"`
+	Content    string `json:"content"`
+	LikeCount  int    `json:"like_count"`
+	Liked      bool   `json:"liked"`
+	Deleted    bool   `json:"deleted"`
+	ReplyCount int    `json:"reply_count,omitempty"`
+	Version    int    `json:"version"`
+	CreatedAt  string `json:"created_at"`
+	Age        string `json:"age"`
+	Author     Author `json:"author"`
 }
 
 type PublicUser struct {

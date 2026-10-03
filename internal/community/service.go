@@ -339,7 +339,8 @@ const postSelect = `
 	       COALESCE((SELECT is_recommended FROM post_moderation WHERE post_id = p.id), 0), p.like_count, p.comment_count,
 	       p.repost_count, p.created_at, p.published_at,
 	       u.id, u.handle, u.display_name, u.avatar_url,
-	       COALESCE(c.id, ''), COALESCE(c.slug, ''), COALESCE(c.name, ''),
+	       COALESCE(c.id, ''), COALESCE(c.slug, ''), COALESCE(c.name, ''), COALESCE(c.description, ''),
+	       COALESCE(c.image_url, ''), COALESCE(c.background_url, ''),
 	       COALESCE((SELECT group_concat(tag.id || char(31) || tag.slug || char(31) || tag.name, char(30))
 	                 FROM post_tags selected_tag JOIN tags tag ON tag.id = selected_tag.tag_id
 	                 WHERE selected_tag.post_id = p.id), ''),
@@ -368,7 +369,8 @@ func scanPost(row scanner) (Post, error) {
 		&post.Status, &post.Visibility, &post.Version, &pinned, &recommended, &post.LikeCount, &post.CommentCount,
 		&post.RepostCount, &post.CreatedAt, &post.PublishedAt,
 		&post.Author.ID, &post.Author.Handle, &post.Author.DisplayName, &post.Author.AvatarURL,
-		&category.ID, &category.Slug, &category.Name, &tagData, &mediaData, &liked, &reposted, &bookmarked)
+		&category.ID, &category.Slug, &category.Name, &category.Description, &category.ImageURL, &category.BackgroundURL,
+		&tagData, &mediaData, &liked, &reposted, &bookmarked)
 	if err != nil {
 		return Post{}, err
 	}
@@ -416,36 +418,132 @@ func (s *Service) ListComments(ctx context.Context, postID, viewerID string, off
 	} else if err != nil {
 		return nil, "", fmt.Errorf("check comment post: %w", err)
 	}
+	// The cursor pages top-level threads, never individual rows. Once a thread is
+	// selected its complete (bounded-depth) presentation is returned, so a page
+	// cannot begin with an orphaned reply. Deleted ancestors are retained only
+	// when a published descendant still needs them as a structural tombstone.
+	rootRows, err := s.db.QueryContext(ctx, `
+		SELECT root.id
+		FROM comments root
+		WHERE root.post_id = ? AND root.parent_id IS NULL AND (
+			root.status = 'published' OR EXISTS (
+				SELECT 1 FROM comments descendant
+				WHERE descendant.post_id = root.post_id AND descendant.status = 'published'
+				  AND descendant.root_id = root.id
+			)
+		)
+		ORDER BY root.created_at DESC, root.id DESC LIMIT ? OFFSET ?`, postID, limit+1, offset)
+	if err != nil {
+		return nil, "", fmt.Errorf("list comment threads: %w", err)
+	}
+	rootIDs := make([]string, 0, limit+1)
+	for rootRows.Next() {
+		var id string
+		if err := rootRows.Scan(&id); err != nil {
+			rootRows.Close()
+			return nil, "", fmt.Errorf("scan comment thread: %w", err)
+		}
+		rootIDs = append(rootIDs, id)
+	}
+	if err := rootRows.Close(); err != nil {
+		return nil, "", err
+	}
+	if err := rootRows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(rootIDs) > limit {
+		rootIDs = rootIDs[:limit]
+		next = platform.EncodeCursor(offset + limit)
+	}
+	if len(rootIDs) == 0 {
+		return []Comment{}, next, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(rootIDs)), ",")
+	args := []any{viewerID}
+	for _, id := range rootIDs {
+		args = append(args, id)
+	}
+	for _, id := range rootIDs {
+		args = append(args, id)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id, c.post_id, COALESCE(c.parent_id, ''), COALESCE(c.root_id, ''), c.depth,
-		       c.body, c.like_count, c.version, c.created_at, u.id, u.handle, u.display_name, u.avatar_url,
+		       c.body, c.status, c.like_count, c.version, c.created_at,
+		       u.id, u.handle, u.display_name, u.avatar_url,
 		       EXISTS(SELECT 1 FROM comment_reactions reaction WHERE reaction.comment_id = c.id AND reaction.user_id = ?)
 		FROM comments c JOIN users u ON u.id = c.author_id
-		WHERE c.post_id = ? AND c.status = 'published'
-		ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?`, viewerID, postID, limit+1, offset)
+		WHERE (c.id IN (`+placeholders+`) OR c.root_id IN (`+placeholders+`)) AND (
+			c.status = 'published' OR EXISTS (
+				SELECT 1 FROM comments child
+				WHERE child.status = 'published' AND (
+					child.parent_id = c.id OR (c.parent_id IS NULL AND child.root_id = c.id)
+				)
+			)
+		)
+		ORDER BY c.created_at ASC, c.id ASC`, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("list comments: %w", err)
+		return nil, "", fmt.Errorf("load comment threads: %w", err)
 	}
 	defer rows.Close()
-	comments := make([]Comment, 0, limit+1)
+	byID := make(map[string]Comment)
+	children := make(map[string][]string)
 	for rows.Next() {
 		var comment Comment
 		var liked bool
+		var status string
 		if err := rows.Scan(&comment.ID, &comment.PostID, &comment.ParentID, &comment.RootID, &comment.Depth,
-			&comment.Body, &comment.LikeCount, &comment.Version, &comment.CreatedAt, &comment.Author.ID, &comment.Author.Handle,
+			&comment.Body, &status, &comment.LikeCount, &comment.Version, &comment.CreatedAt, &comment.Author.ID, &comment.Author.Handle,
 			&comment.Author.DisplayName, &comment.Author.AvatarURL, &liked); err != nil {
 			return nil, "", fmt.Errorf("scan comment: %w", err)
 		}
 		comment.Liked = liked
+		comment.Deleted = status == "deleted"
+		comment.ThreadID = comment.RootID
+		if comment.ThreadID == "" {
+			comment.ThreadID = comment.ID
+		}
+		comment = shapeComment(comment)
+		byID[comment.ID] = comment
+		if comment.ParentID != "" {
+			children[comment.ParentID] = append(children[comment.ParentID], comment.ID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	comments := make([]Comment, 0, len(byID))
+	var appendThread func(string)
+	appendThread = func(id string) {
+		comment, ok := byID[id]
+		if !ok {
+			return
+		}
+		if comment.Depth == 0 {
+			comment.ReplyCount = countThreadReplies(id, children)
+		}
 		comments = append(comments, comment)
-		comments[len(comments)-1] = shapeComment(comment)
+		for _, childID := range children[id] {
+			appendThread(childID)
+		}
 	}
-	next := ""
-	if len(comments) > limit {
-		comments = comments[:limit]
-		next = platform.EncodeCursor(offset + limit)
+	for _, rootID := range rootIDs {
+		appendThread(rootID)
 	}
-	return comments, next, rows.Err()
+	return comments, next, nil
+}
+
+func countThreadReplies(rootID string, children map[string][]string) int {
+	count := 0
+	var visit func(string)
+	visit = func(id string) {
+		for _, child := range children[id] {
+			count++
+			visit(child)
+		}
+	}
+	visit(rootID)
+	return count
 }
 
 func (s *Service) AddComment(ctx context.Context, postID, authorID, parentID, idempotencyKey, body string) (Comment, bool, error) {
@@ -535,20 +633,41 @@ func (s *Service) AddComment(ctx context.Context, postID, authorID, parentID, id
 
 func (s *Service) comment(ctx context.Context, commentID string) (Comment, error) {
 	var comment Comment
+	var status string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT c.id, c.post_id, COALESCE(c.parent_id, ''), COALESCE(c.root_id, ''), c.depth,
-		       c.body, c.like_count, c.version, c.created_at, u.id, u.handle, u.display_name, u.avatar_url
+		       c.body, c.status, c.like_count, c.version, c.created_at, u.id, u.handle, u.display_name, u.avatar_url
 		FROM comments c JOIN users u ON u.id = c.author_id WHERE c.id = ?`, commentID).Scan(
 		&comment.ID, &comment.PostID, &comment.ParentID, &comment.RootID, &comment.Depth,
-		&comment.Body, &comment.LikeCount, &comment.Version, &comment.CreatedAt, &comment.Author.ID, &comment.Author.Handle,
+		&comment.Body, &status, &comment.LikeCount, &comment.Version, &comment.CreatedAt, &comment.Author.ID, &comment.Author.Handle,
 		&comment.Author.DisplayName, &comment.Author.AvatarURL)
 	if err != nil {
 		return Comment{}, fmt.Errorf("load comment: %w", err)
+	}
+	comment.Deleted = status == "deleted"
+	comment.ThreadID = comment.RootID
+	if comment.ThreadID == "" {
+		comment.ThreadID = comment.ID
 	}
 	return shapeComment(comment), nil
 }
 
 func shapeComment(comment Comment) Comment {
+	if comment.ThreadID == "" {
+		comment.ThreadID = comment.RootID
+		if comment.ThreadID == "" {
+			comment.ThreadID = comment.ID
+		}
+	}
+	if comment.Deleted {
+		comment.Body = ""
+		comment.Content = ""
+		comment.LikeCount = 0
+		comment.Liked = false
+		comment.Author = Author{DisplayName: "已删除", Name: "已删除"}
+		comment.Age = relativeAge(comment.CreatedAt)
+		return comment
+	}
 	comment.Author.Name = comment.Author.DisplayName
 	comment.Content = comment.Body
 	comment.Age = relativeAge(comment.CreatedAt)

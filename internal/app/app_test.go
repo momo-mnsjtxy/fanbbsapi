@@ -758,12 +758,33 @@ func TestAdminUserContentAndTaxonomyOperations(t *testing.T) {
 	}, nil), http.StatusConflict)
 
 	expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/categories", memberAccess, map[string]any{"slug": "local-news", "name": "本地新闻"}, nil), http.StatusForbidden)
-	category := expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/categories", adminAccess, map[string]any{"slug": "local-news", "name": "本地新闻"}, nil), http.StatusCreated)
+	category := expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/categories", adminAccess, map[string]any{
+		"slug": "local-news", "name": "本地新闻", "description": "社区周边与线下活动资讯",
+		"image_url": "/api/v1/media/category-news", "background_url": "https://static.example.test/categories/news.webp",
+	}, nil), http.StatusCreated)
 	categoryID := category["data"].(map[string]any)["id"].(string)
+	if category["data"].(map[string]any)["description"] != "社区周边与线下活动资讯" || category["data"].(map[string]any)["image_url"] != "/api/v1/media/category-news" {
+		t.Fatalf("rich category fields were not created: %#v", category)
+	}
+	expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/categories", adminAccess, map[string]any{
+		"slug": "unsafe-art", "name": "不安全图片", "image_url": "javascript:alert(1)",
+	}, nil), http.StatusUnprocessableEntity)
 	expectStatus(t, api.request(http.MethodPost, "/api/v1/admin/categories", adminAccess, map[string]any{"slug": "LOCAL-NEWS", "name": "另一个名字"}, nil), http.StatusConflict)
-	updatedCategory := expectStatus(t, api.request(http.MethodPatch, "/api/v1/admin/categories/"+categoryID, adminAccess, map[string]any{"name": "本地资讯"}, nil), http.StatusOK)
-	if updatedCategory["data"].(map[string]any)["name"] != "本地资讯" {
+	updatedCategory := expectStatus(t, api.request(http.MethodPatch, "/api/v1/admin/categories/"+categoryID, adminAccess, map[string]any{
+		"name": "本地资讯", "description": "更新后的社区资讯", "background_url": "/media/local-news-cover.webp",
+	}, nil), http.StatusOK)
+	if updatedCategory["data"].(map[string]any)["name"] != "本地资讯" || updatedCategory["data"].(map[string]any)["description"] != "更新后的社区资讯" {
 		t.Fatalf("category update mismatch: %#v", updatedCategory)
+	}
+	publicCategories := expectStatus(t, api.request(http.MethodGet, "/api/v1/categories", "", nil, nil), http.StatusOK)
+	var publicCategory map[string]any
+	for _, item := range publicCategories["data"].([]any) {
+		if candidate := item.(map[string]any); candidate["id"] == categoryID {
+			publicCategory = candidate
+		}
+	}
+	if publicCategory == nil || publicCategory["description"] != "更新后的社区资讯" || publicCategory["background_url"] != "/media/local-news-cover.webp" {
+		t.Fatalf("public category presentation mismatch: %#v", publicCategories)
 	}
 	expectStatus(t, api.request(http.MethodDelete, "/api/v1/admin/categories/cat_tech", adminAccess, map[string]any{"reason": "仍在使用的分类"}, nil), http.StatusConflict)
 	expectStatus(t, api.request(http.MethodDelete, "/api/v1/admin/categories/"+categoryID, adminAccess, map[string]any{"reason": "清理测试分类"}, nil), http.StatusOK)

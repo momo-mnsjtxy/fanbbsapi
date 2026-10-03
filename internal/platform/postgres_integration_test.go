@@ -32,8 +32,8 @@ func TestPostgresAdapterAndSyntheticMigrationRehearsal(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 8 {
-		t.Fatalf("expected 8 PostgreSQL migrations, got %d", migrationCount)
+	if migrationCount != 10 {
+		t.Fatalf("expected 10 PostgreSQL migrations, got %d", migrationCount)
 	}
 	if err := platform.ApplyPostgresMigrations(ctx, db); err != nil {
 		t.Fatalf("idempotent migration rerun: %v", err)

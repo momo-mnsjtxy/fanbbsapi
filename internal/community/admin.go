@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -308,7 +309,37 @@ func validateTaxonomyInput(slug, name string) (string, string, error) {
 	return slug, name, nil
 }
 
-func (s *Service) CreateTaxonomy(ctx context.Context, actor identity.User, requestID, kind, slug, name string) (any, error) {
+func validateCategoryPresentation(description, imageURL, backgroundURL string) (string, string, string, error) {
+	description = strings.TrimSpace(description)
+	imageURL = strings.TrimSpace(imageURL)
+	backgroundURL = strings.TrimSpace(backgroundURL)
+	fields := map[string][]string{}
+	if len([]rune(description)) > 500 {
+		fields["description"] = []string{"分类描述不能超过 500 个字符"}
+	}
+	for field, value := range map[string]string{"image_url": imageURL, "background_url": backgroundURL} {
+		if len(value) > 500 || !validCategoryMediaReference(value) {
+			fields[field] = []string{"必须是空值、站内绝对路径或 http(s) URL，且不能超过 500 个字符"}
+		}
+	}
+	if len(fields) > 0 {
+		return "", "", "", platform.Validation(fields)
+	}
+	return description, imageURL, backgroundURL, nil
+}
+
+func validCategoryMediaReference(value string) bool {
+	if value == "" {
+		return true
+	}
+	if strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") && !strings.ContainsAny(value, "\r\n\\") {
+		return true
+	}
+	parsed, err := url.ParseRequestURI(value)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
+func (s *Service) CreateTaxonomy(ctx context.Context, actor identity.User, requestID, kind, slug, name, description, imageURL, backgroundURL string) (any, error) {
 	slug, name, err := validateTaxonomyInput(slug, name)
 	if err != nil {
 		return nil, err
@@ -318,6 +349,12 @@ func (s *Service) CreateTaxonomy(ctx context.Context, actor identity.User, reque
 		table, prefix = "tags", "tag"
 	} else if kind != "category" {
 		return nil, platform.Validation(map[string][]string{"type": {"分类类型无效"}})
+	}
+	if kind == "category" {
+		description, imageURL, backgroundURL, err = validateCategoryPresentation(description, imageURL, backgroundURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -340,12 +377,16 @@ func (s *Service) CreateTaxonomy(ctx context.Context, actor identity.User, reque
 	if kind == "tag" {
 		_, err = tx.ExecContext(ctx, `INSERT INTO tags(id, slug, name, created_at) VALUES (?, ?, ?, ?)`, id, slug, name, now.Format(time.RFC3339Nano))
 	} else {
-		_, err = tx.ExecContext(ctx, `INSERT INTO categories(id, slug, name) VALUES (?, ?, ?)`, id, slug, name)
+		_, err = tx.ExecContext(ctx, `INSERT INTO categories(id, slug, name, description, image_url, background_url) VALUES (?, ?, ?, ?, ?, ?)`, id, slug, name, description, imageURL, backgroundURL)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("create taxonomy: %w", err)
 	}
-	if err := insertAudit(ctx, tx, actor.ID, "taxonomy_create", kind, id, map[string]any{}, map[string]string{"slug": slug, "name": name}, "创建分类项", requestID, now); err != nil {
+	after := map[string]string{"slug": slug, "name": name}
+	if kind == "category" {
+		after["description"], after["image_url"], after["background_url"] = description, imageURL, backgroundURL
+	}
+	if err := insertAudit(ctx, tx, actor.ID, "taxonomy_create", kind, id, map[string]any{}, after, "创建分类项", requestID, now); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -354,40 +395,65 @@ func (s *Service) CreateTaxonomy(ctx context.Context, actor identity.User, reque
 	if kind == "tag" {
 		return Tag{ID: id, Slug: slug, Name: name}, nil
 	}
-	return Category{ID: id, Slug: slug, Name: name}, nil
+	return Category{ID: id, Slug: slug, Name: name, Description: description, ImageURL: imageURL, BackgroundURL: backgroundURL}, nil
 }
 
-func (s *Service) UpdateTaxonomy(ctx context.Context, actor identity.User, requestID, kind, id string, slugInput, nameInput *string) (any, error) {
+func (s *Service) UpdateTaxonomy(ctx context.Context, actor identity.User, requestID, kind, id string, slugInput, nameInput, descriptionInput, imageURLInput, backgroundURLInput *string) (any, error) {
 	table := "categories"
 	if kind == "tag" {
 		table = "tags"
 	} else if kind != "category" {
 		return nil, platform.Validation(map[string][]string{"type": {"分类类型无效"}})
 	}
-	if slugInput == nil && nameInput == nil {
-		return nil, platform.Validation(map[string][]string{"body": {"至少提供 slug 或 name"}})
+	if slugInput == nil && nameInput == nil && descriptionInput == nil && imageURLInput == nil && backgroundURLInput == nil {
+		return nil, platform.Validation(map[string][]string{"body": {"至少提供一个可更新字段"}})
+	}
+	if kind == "tag" && (descriptionInput != nil || imageURLInput != nil || backgroundURLInput != nil) {
+		return nil, platform.Validation(map[string][]string{"body": {"标签不支持分类展示字段"}})
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin taxonomy update: %w", err)
 	}
 	defer tx.Rollback()
-	var oldSlug, oldName string
-	if err := tx.QueryRowContext(ctx, `SELECT slug, name FROM `+table+` WHERE id = ?`, id).Scan(&oldSlug, &oldName); err == sql.ErrNoRows {
+	var oldSlug, oldName, oldDescription, oldImageURL, oldBackgroundURL string
+	loadQuery := `SELECT slug, name FROM ` + table + ` WHERE id = ?`
+	loadTargets := []any{&oldSlug, &oldName}
+	if kind == "category" {
+		loadQuery = `SELECT slug, name, description, image_url, background_url FROM categories WHERE id = ?`
+		loadTargets = append(loadTargets, &oldDescription, &oldImageURL, &oldBackgroundURL)
+	}
+	if err := tx.QueryRowContext(ctx, loadQuery, id).Scan(loadTargets...); err == sql.ErrNoRows {
 		return nil, platform.Problem(http.StatusNotFound, "taxonomy_not_found", "分类项不存在")
 	} else if err != nil {
 		return nil, fmt.Errorf("load taxonomy: %w", err)
 	}
 	slug, name := oldSlug, oldName
+	description, imageURL, backgroundURL := oldDescription, oldImageURL, oldBackgroundURL
 	if slugInput != nil {
 		slug = *slugInput
 	}
 	if nameInput != nil {
 		name = *nameInput
 	}
+	if descriptionInput != nil {
+		description = *descriptionInput
+	}
+	if imageURLInput != nil {
+		imageURL = *imageURLInput
+	}
+	if backgroundURLInput != nil {
+		backgroundURL = *backgroundURLInput
+	}
 	slug, name, err = validateTaxonomyInput(slug, name)
 	if err != nil {
 		return nil, err
+	}
+	if kind == "category" {
+		description, imageURL, backgroundURL, err = validateCategoryPresentation(description, imageURL, backgroundURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var existing string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE id <> ? AND (lower(slug) = lower(?) OR lower(name) = lower(?))`, id, slug, name).Scan(&existing)
@@ -397,12 +463,24 @@ func (s *Service) UpdateTaxonomy(ctx context.Context, actor identity.User, reque
 	if err != sql.ErrNoRows {
 		return nil, fmt.Errorf("check taxonomy update conflict: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET slug = ?, name = ? WHERE id = ?`, slug, name, id); err != nil {
+	updateQuery := `UPDATE ` + table + ` SET slug = ?, name = ? WHERE id = ?`
+	updateArgs := []any{slug, name, id}
+	if kind == "category" {
+		updateQuery = `UPDATE categories SET slug = ?, name = ?, description = ?, image_url = ?, background_url = ? WHERE id = ?`
+		updateArgs = []any{slug, name, description, imageURL, backgroundURL, id}
+	}
+	if _, err := tx.ExecContext(ctx, updateQuery, updateArgs...); err != nil {
 		return nil, fmt.Errorf("update taxonomy: %w", err)
 	}
 	now := s.now().UTC()
+	before := map[string]string{"slug": oldSlug, "name": oldName}
+	after := map[string]string{"slug": slug, "name": name}
+	if kind == "category" {
+		before["description"], before["image_url"], before["background_url"] = oldDescription, oldImageURL, oldBackgroundURL
+		after["description"], after["image_url"], after["background_url"] = description, imageURL, backgroundURL
+	}
 	if err := insertAudit(ctx, tx, actor.ID, "taxonomy_update", kind, id,
-		map[string]string{"slug": oldSlug, "name": oldName}, map[string]string{"slug": slug, "name": name}, "更新分类项", requestID, now); err != nil {
+		before, after, "更新分类项", requestID, now); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -411,7 +489,7 @@ func (s *Service) UpdateTaxonomy(ctx context.Context, actor identity.User, reque
 	if kind == "tag" {
 		return Tag{ID: id, Slug: slug, Name: name}, nil
 	}
-	return Category{ID: id, Slug: slug, Name: name}, nil
+	return Category{ID: id, Slug: slug, Name: name, Description: description, ImageURL: imageURL, BackgroundURL: backgroundURL}, nil
 }
 
 func (s *Service) DeleteTaxonomy(ctx context.Context, actor identity.User, requestID, kind, id, reason string) error {
@@ -430,8 +508,14 @@ func (s *Service) DeleteTaxonomy(ctx context.Context, actor identity.User, reque
 		return fmt.Errorf("begin taxonomy delete: %w", err)
 	}
 	defer tx.Rollback()
-	var slug, name string
-	if err := tx.QueryRowContext(ctx, `SELECT slug, name FROM `+table+` WHERE id = ?`, id).Scan(&slug, &name); err == sql.ErrNoRows {
+	var slug, name, description, imageURL, backgroundURL string
+	loadQuery := `SELECT slug, name FROM ` + table + ` WHERE id = ?`
+	loadTargets := []any{&slug, &name}
+	if kind == "category" {
+		loadQuery = `SELECT slug, name, description, image_url, background_url FROM categories WHERE id = ?`
+		loadTargets = append(loadTargets, &description, &imageURL, &backgroundURL)
+	}
+	if err := tx.QueryRowContext(ctx, loadQuery, id).Scan(loadTargets...); err == sql.ErrNoRows {
 		return platform.Problem(http.StatusNotFound, "taxonomy_not_found", "分类项不存在")
 	} else if err != nil {
 		return fmt.Errorf("load taxonomy delete: %w", err)
@@ -447,7 +531,11 @@ func (s *Service) DeleteTaxonomy(ctx context.Context, actor identity.User, reque
 		return fmt.Errorf("delete taxonomy: %w", err)
 	}
 	now := s.now().UTC()
-	if err := insertAudit(ctx, tx, actor.ID, "taxonomy_delete", kind, id, map[string]string{"slug": slug, "name": name}, map[string]any{}, reason, requestID, now); err != nil {
+	before := map[string]string{"slug": slug, "name": name}
+	if kind == "category" {
+		before["description"], before["image_url"], before["background_url"] = description, imageURL, backgroundURL
+	}
+	if err := insertAudit(ctx, tx, actor.ID, "taxonomy_delete", kind, id, before, map[string]any{}, reason, requestID, now); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -519,15 +607,18 @@ func taxonomyID(r *http.Request) string {
 
 func (s *Service) createTaxonomyHTTP(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Slug string `json:"slug"`
-		Name string `json:"name"`
+		Slug          string `json:"slug"`
+		Name          string `json:"name"`
+		Description   string `json:"description"`
+		ImageURL      string `json:"image_url"`
+		BackgroundURL string `json:"background_url"`
 	}
 	if err := platform.DecodeJSON(w, r, &input); err != nil {
 		platform.WriteError(w, r, err)
 		return
 	}
 	actor, _ := identity.UserFromContext(r.Context())
-	item, err := s.CreateTaxonomy(r.Context(), actor, platform.RequestID(r.Context()), taxonomyKind(r), input.Slug, input.Name)
+	item, err := s.CreateTaxonomy(r.Context(), actor, platform.RequestID(r.Context()), taxonomyKind(r), input.Slug, input.Name, input.Description, input.ImageURL, input.BackgroundURL)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return
@@ -537,15 +628,18 @@ func (s *Service) createTaxonomyHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) updateTaxonomyHTTP(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Slug *string `json:"slug"`
-		Name *string `json:"name"`
+		Slug          *string `json:"slug"`
+		Name          *string `json:"name"`
+		Description   *string `json:"description"`
+		ImageURL      *string `json:"image_url"`
+		BackgroundURL *string `json:"background_url"`
 	}
 	if err := platform.DecodeJSON(w, r, &input); err != nil {
 		platform.WriteError(w, r, err)
 		return
 	}
 	actor, _ := identity.UserFromContext(r.Context())
-	item, err := s.UpdateTaxonomy(r.Context(), actor, platform.RequestID(r.Context()), taxonomyKind(r), taxonomyID(r), input.Slug, input.Name)
+	item, err := s.UpdateTaxonomy(r.Context(), actor, platform.RequestID(r.Context()), taxonomyKind(r), taxonomyID(r), input.Slug, input.Name, input.Description, input.ImageURL, input.BackgroundURL)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return

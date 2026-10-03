@@ -207,7 +207,8 @@ paths:
         '428': {$ref: '#/components/responses/Error'}
   /posts/{post_id}/comments:
     get:
-      summary: List comments and replies
+      summary: List complete comment threads with privacy-safe deleted-ancestor tombstones
+      description: The opaque cursor pages top-level threads. Every selected thread is returned as a flat depth-first sequence linked by thread_id, parent_id, root_id, and depth; deleted leaves are omitted while a deleted ancestor of a live reply is returned with deleted=true and blank content/author identity.
       operationId: listComments
       parameters:
         - {$ref: '#/components/parameters/PostID'}
@@ -538,8 +539,7 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                  - {$ref: '#/components/schemas/DataEnvelope'}
+                $ref: '#/components/schemas/CategoryListEnvelope'
   /tags:
     get:
       summary: List tags
@@ -580,12 +580,67 @@ paths:
         '200': {$ref: '#/components/responses/Interaction'}
   /me/bookmarks:
     get:
-      summary: List the current user's viewer-visible bookmarks
+      summary: List the current user's private viewer-visible bookmarks
+      description: Bookmarks are always owner-only and are never projected from public profile or collection endpoints.
       operationId: listMyBookmarks
       security: [{bearerAuth: []}]
       parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
       responses:
         '200': {$ref: '#/components/responses/PostList'}
+  /me/collections:
+    get:
+      summary: List all public and private collections owned by the current user
+      operationId: listMyCollections
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Owner collection page, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    post:
+      summary: Create a curated collection with explicit private or public visibility
+      operationId: createCollection
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CollectionInput'}}}}
+      responses: {'201': {description: Collection, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/collections/{collection_id}:
+    patch:
+      summary: Replace owned collection metadata and privacy at the expected version
+      operationId: updateCollection
+      security: [{bearerAuth: []}]
+      parameters: [{name: collection_id, in: path, required: true, schema: {type: string}}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CollectionInput'}}}}
+      responses: {'200': {description: Updated collection, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+    delete:
+      summary: Delete an owned collection without changing bookmarks or posts
+      operationId: deleteCollection
+      security: [{bearerAuth: []}]
+      parameters: [{name: collection_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Deleted, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}}
+  /me/collections/{collection_id}/posts/{post_id}:
+    put:
+      summary: Idempotently add a viewer-visible post to an owned collection
+      operationId: addCollectionPost
+      security: [{bearerAuth: []}]
+      parameters: [{name: collection_id, in: path, required: true, schema: {type: string}}, {$ref: '#/components/parameters/PostID'}]
+      responses: {'200': {$ref: '#/components/responses/Interaction'}, '404': {$ref: '#/components/responses/Error'}}
+    delete:
+      summary: Idempotently remove a post from an owned collection
+      operationId: removeCollectionPost
+      security: [{bearerAuth: []}]
+      parameters: [{name: collection_id, in: path, required: true, schema: {type: string}}, {$ref: '#/components/parameters/PostID'}]
+      responses: {'200': {$ref: '#/components/responses/Interaction'}, '404': {$ref: '#/components/responses/Error'}}
+  /users/{user_id}/collections:
+    get:
+      summary: List only the user's public collections
+      description: Blocked profiles are masked. Private collection metadata and bookmark state are never exposed.
+      operationId: listPublicCollections
+      parameters: [{$ref: '#/components/parameters/UserID'}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Public collection page, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}}
+  /collections/{collection_id}:
+    get:
+      summary: Get a public collection or an owned private collection
+      description: Posts are filtered through the same viewer-aware visibility and block predicate as feeds. Hidden collection items are omitted.
+      operationId: getCollection
+      parameters: [{name: collection_id, in: path, required: true, schema: {type: string}}, {$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Collection and viewer-visible post page, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}}
   /users/{user_id}/follow:
     put:
       summary: Idempotently follow an active user
@@ -907,7 +962,7 @@ paths:
       security: [{bearerAuth: []}]
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/CreateTaxonomy'}}}
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateCategory'}}}
       responses:
         '201': {description: Created category, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
         '400': {$ref: '#/components/responses/Error'}
@@ -923,7 +978,7 @@ paths:
       parameters: [{$ref: '#/components/parameters/CategoryID'}]
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateTaxonomy'}}}
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateCategory'}}}
       responses:
         '200': {description: Updated category, content: {application/json: {schema: {$ref: '#/components/schemas/CategoryEnvelope'}}}}
         '400': {$ref: '#/components/responses/Error'}
@@ -1272,13 +1327,41 @@ paths:
       security: [{bearerAuth: []}]
       parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
       responses: {'200': {description: Removal result, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/shipping-addresses:
+    get:
+      summary: List owner-scoped shipping addresses
+      operationId: listMyShippingAddresses
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: Shipping addresses, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+    post:
+      summary: Create an owner-scoped shipping address
+      description: The first address becomes the default. Address data is never public and no external shipping provider is contacted.
+      operationId: createShippingAddress
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ShippingAddressInput'}}}}
+      responses: {'201': {description: Shipping address, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}}
+  /me/shipping-addresses/{address_id}:
+    patch:
+      summary: Replace an owned shipping address at the expected version
+      operationId: updateShippingAddress
+      security: [{bearerAuth: []}]
+      parameters: [{name: address_id, in: path, required: true, schema: {type: string}}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ShippingAddressInput'}}}}
+      responses: {'200': {description: Updated shipping address, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+    delete:
+      summary: Delete an owned shipping address and promote a replacement default when present
+      operationId: deleteShippingAddress
+      security: [{bearerAuth: []}]
+      parameters: [{name: address_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Deleted, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '404': {$ref: '#/components/responses/Error'}}
   /orders:
     post:
       summary: Create a non-payment order and atomically reserve local integer inventory
-      description: Clears the cart in the same transaction. This operation never charges money, spends points, creates a provider intent, or buys paid content.
+      description: Clears the cart and snapshots the selected or default owner address in the same transaction. This operation never charges money, spends points, creates a provider intent, buys paid content, or contacts a shipping provider.
       operationId: createLocalOrder
       security: [{bearerAuth: []}]
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      parameters: [{$ref: '#/components/parameters/RequiredIdempotencyKey'}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {address_id: {type: string, description: Optional owned address to snapshot; the default is used when omitted.}}}}}}
       responses:
         '201': {description: Inventory reserved and order created, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
         '200': {description: Idempotent replay, headers: {Idempotency-Replayed: {schema: {type: string, const: 'true'}}}, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}
@@ -1307,6 +1390,14 @@ paths:
       parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {reason: {type: string, maxLength: 500}}}}}}
       responses: {'200': {description: Cancelled or idempotent terminal result, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+  /orders/{order_id}/tracking:
+    get:
+      summary: List the owned order's immutable manual tracking timeline
+      description: Every event has source=manual; this endpoint performs no live carrier lookup.
+      operationId: getMyOrderTracking
+      security: [{bearerAuth: []}]
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Tracking events, content: {application/json: {schema: {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/TrackingEvent'}}}}}}}, '404': {$ref: '#/components/responses/Error'}}
   /me/check-in:
     post:
       summary: Claim the UTC daily local check-in award exactly once
@@ -1439,6 +1530,15 @@ paths:
       parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/OrderTransitionInput'}}}}
       responses: {'200': {description: Transitioned order, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
+  /admin/orders/{order_id}/tracking-events:
+    post:
+      summary: Append an audited immutable manual tracking event
+      description: Accepted only after local manual fulfillment. No carrier API, webhook, payment, or provider identifier is used.
+      operationId: adminAppendOrderTracking
+      security: [{bearerAuth: []}]
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TrackingEventInput'}}}}
+      responses: {'201': {description: Manual tracking event, content: {application/json: {schema: {$ref: '#/components/schemas/DataEnvelope'}}}}, '409': {$ref: '#/components/responses/Error'}}
   /admin/tasks:
     get:
       summary: List all local tasks
@@ -1582,6 +1682,33 @@ components:
         fulfillment_carrier: {type: string, maxLength: 100}
         tracking_code: {type: string, maxLength: 200}
         reason: {type: string, maxLength: 500}
+    CollectionInput:
+      type: object
+      required: [name, visibility]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 80}
+        description: {type: string, maxLength: 500}
+        visibility: {type: string, enum: [private, public], default: private}
+    ShippingAddressInput:
+      type: object
+      required: [recipient_name, phone, region, address_line]
+      properties:
+        label: {type: string, maxLength: 40}
+        recipient_name: {type: string, minLength: 1, maxLength: 80}
+        phone: {type: string, minLength: 3, maxLength: 40}
+        region: {type: string, minLength: 1, maxLength: 120}
+        address_line: {type: string, minLength: 1, maxLength: 300}
+        postal_code: {type: string, maxLength: 20}
+        is_default: {type: boolean, default: false}
+    TrackingEventInput:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [label_created, in_transit, out_for_delivery, delivered, exception]}
+        description: {type: string, maxLength: 500}
+        location: {type: string, maxLength: 200}
+        occurred_at: {type: string, format: date-time, description: Defaults to the server's current UTC time.}
+        reason: {type: string, maxLength: 500}
     TaskInput:
       type: object
       required: [code, name, repeat_policy]
@@ -1669,21 +1796,74 @@ components:
         published_at: {type: string, format: date-time}
     Comment:
       type: object
-      required: [id, post_id, depth, body, content, author, created_at]
+      required: [id, post_id, thread_id, depth, body, content, deleted, author, created_at]
       properties:
         id: {type: string}
         post_id: {type: string}
         parent_id: {type: string}
         root_id: {type: string}
+        thread_id: {type: string, description: Always populated; equals the top-level comment ID for every row in one thread.}
         depth: {type: integer, minimum: 0, maximum: 2}
-        body: {type: string}
-        content: {type: string}
+        body: {type: string, description: Empty for a deleted-ancestor tombstone.}
+        content: {type: string, description: Empty for a deleted-ancestor tombstone.}
         like_count: {type: integer}
         liked: {type: boolean}
+        deleted: {type: boolean, description: True only for a privacy-safe structural tombstone whose live descendants remain visible.}
+        reply_count: {type: integer, description: Present on top-level rows and counts rows returned in that complete thread.}
         version: {type: integer}
         age: {type: string}
         created_at: {type: string, format: date-time}
         author: {$ref: '#/components/schemas/Author'}
+    Collection:
+      type: object
+      required: [id, name, description, visibility, version, item_count, owner, created_at, updated_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        visibility: {type: string, enum: [private, public]}
+        version: {type: integer, minimum: 1}
+        item_count: {type: integer, minimum: 0, description: Exact for owner reads; public discovery avoids counts that could reveal hidden items.}
+        owner: {$ref: '#/components/schemas/Author'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ShippingAddress:
+      type: object
+      required: [id, label, recipient_name, phone, region, address_line, postal_code, is_default, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        label: {type: string}
+        recipient_name: {type: string}
+        phone: {type: string}
+        region: {type: string}
+        address_line: {type: string}
+        postal_code: {type: string}
+        is_default: {type: boolean}
+        version: {type: integer, minimum: 1}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ShippingAddressSnapshot:
+      type: object
+      required: [label, recipient_name, phone, region, address_line, postal_code]
+      properties:
+        source_address_id: {type: string}
+        label: {type: string}
+        recipient_name: {type: string}
+        phone: {type: string}
+        region: {type: string}
+        address_line: {type: string}
+        postal_code: {type: string}
+    TrackingEvent:
+      type: object
+      required: [id, status, description, location, source, occurred_at, created_at]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [label_created, in_transit, out_for_delivery, delivered, exception]}
+        description: {type: string}
+        location: {type: string}
+        source: {type: string, const: manual}
+        occurred_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
     CreatePost:
       type: object
       properties:
@@ -1762,11 +1942,14 @@ components:
         meta: {$ref: '#/components/schemas/Meta'}
     Category:
       type: object
-      required: [id, slug, name]
+      required: [id, slug, name, description, image_url, background_url]
       properties:
         id: {type: string}
         slug: {type: string}
         name: {type: string}
+        description: {type: string, maxLength: 500}
+        image_url: {type: string, maxLength: 500, description: Empty, an application-local absolute path, or an http(s) URL}
+        background_url: {type: string, maxLength: 500, description: Empty, an application-local absolute path, or an http(s) URL}
         post_count: {type: integer}
     Tag:
       type: object
@@ -2011,12 +2194,29 @@ components:
       properties:
         slug: {type: string, minLength: 2, maxLength: 50, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
         name: {type: string, minLength: 1, maxLength: 50}
+    CreateCategory:
+      allOf:
+        - {$ref: '#/components/schemas/CreateTaxonomy'}
+        - type: object
+          properties:
+            description: {type: string, maxLength: 500}
+            image_url: {type: string, maxLength: 500}
+            background_url: {type: string, maxLength: 500}
     UpdateTaxonomy:
       type: object
       minProperties: 1
       properties:
         slug: {type: string, minLength: 2, maxLength: 50, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
         name: {type: string, minLength: 1, maxLength: 50}
+    UpdateCategory:
+      type: object
+      minProperties: 1
+      properties:
+        slug: {type: string, minLength: 2, maxLength: 50, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
+        name: {type: string, minLength: 1, maxLength: 50}
+        description: {type: string, maxLength: 500}
+        image_url: {type: string, maxLength: 500}
+        background_url: {type: string, maxLength: 500}
     DeleteTaxonomy:
       type: object
       required: [reason]
@@ -2027,6 +2227,12 @@ components:
       required: [data, meta]
       properties:
         data: {$ref: '#/components/schemas/Category'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    CategoryListEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {type: array, items: {$ref: '#/components/schemas/Category'}}
         meta: {$ref: '#/components/schemas/Meta'}
     TagEnvelope:
       type: object

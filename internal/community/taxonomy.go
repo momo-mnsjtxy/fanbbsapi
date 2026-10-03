@@ -14,10 +14,10 @@ import (
 
 func (s *Service) Categories(ctx context.Context) ([]Category, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.slug, c.name,
+		SELECT c.id, c.slug, c.name, c.description, c.image_url, c.background_url,
 		       COUNT(CASE WHEN p.status = 'published' AND p.visibility = 'public' THEN 1 END)
 		FROM categories c LEFT JOIN posts p ON p.category_id = c.id
-		GROUP BY c.id, c.slug, c.name ORDER BY c.name ASC`)
+		GROUP BY c.id, c.slug, c.name, c.description, c.image_url, c.background_url ORDER BY c.name ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list categories: %w", err)
 	}
@@ -25,7 +25,7 @@ func (s *Service) Categories(ctx context.Context) ([]Category, error) {
 	items := []Category{}
 	for rows.Next() {
 		var item Category
-		if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.PostCount); err != nil {
+		if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Description, &item.ImageURL, &item.BackgroundURL, &item.PostCount); err != nil {
 			return nil, fmt.Errorf("scan category: %w", err)
 		}
 		items = append(items, item)

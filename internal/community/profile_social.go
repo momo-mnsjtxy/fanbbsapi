@@ -288,12 +288,12 @@ func (s *Service) UnfollowCategory(ctx context.Context, userID, categoryID strin
 
 func (s *Service) FollowedCategories(ctx context.Context, userID string, offset, limit int) ([]CategoryFollow, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.slug, c.name,
+		SELECT c.id, c.slug, c.name, c.description, c.image_url, c.background_url,
 		       COUNT(CASE WHEN p.status = 'published' AND p.visibility = 'public' THEN 1 END), f.created_at
 		FROM category_follows f JOIN categories c ON c.id = f.category_id
 		LEFT JOIN posts p ON p.category_id = c.id
 		WHERE f.user_id = ?
-		GROUP BY c.id, c.slug, c.name, f.created_at
+		GROUP BY c.id, c.slug, c.name, c.description, c.image_url, c.background_url, f.created_at
 		ORDER BY f.created_at DESC, c.id DESC LIMIT ? OFFSET ?`, userID, limit+1, offset)
 	if err != nil {
 		return nil, "", fmt.Errorf("list category follows: %w", err)
@@ -302,7 +302,8 @@ func (s *Service) FollowedCategories(ctx context.Context, userID string, offset,
 	items := []CategoryFollow{}
 	for rows.Next() {
 		var item CategoryFollow
-		if err := rows.Scan(&item.Category.ID, &item.Category.Slug, &item.Category.Name, &item.Category.PostCount, &item.FollowedAt); err != nil {
+		if err := rows.Scan(&item.Category.ID, &item.Category.Slug, &item.Category.Name, &item.Category.Description,
+			&item.Category.ImageURL, &item.Category.BackgroundURL, &item.Category.PostCount, &item.FollowedAt); err != nil {
 			return nil, "", fmt.Errorf("scan category follow: %w", err)
 		}
 		items = append(items, item)
