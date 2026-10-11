@@ -50,6 +50,7 @@ type Conversation struct {
 	Members           []ConversationMember `json:"members"`
 	LastMessage       *Message             `json:"last_message,omitempty"`
 	LastReadMessageID string               `json:"last_read_message_id,omitempty"`
+	UnreadCount       int64                `json:"unread_count"`
 	activitySequence  int64
 }
 
@@ -240,10 +241,11 @@ func (s *Service) Conversation(ctx context.Context, conversationID, viewerID str
 	var lastMessageID string
 	var readSequence int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT c.id, c.title, c.status, c.created_at, c.updated_at, c.activity_sequence, COALESCE(c.last_message_id, ''), cm.read_sequence
+		SELECT c.id, c.title, c.status, c.created_at, c.updated_at, c.activity_sequence, COALESCE(c.last_message_id, ''), cm.read_sequence,
+ (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sequence > cm.read_sequence AND m.sender_id <> cm.user_id)
 		FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
 		WHERE c.id = ? AND cm.user_id = ? AND cm.left_at IS NULL AND c.status = 'active'`, conversationID, viewerID).
-		Scan(&item.ID, &item.Title, &item.Status, &item.CreatedAt, &item.UpdatedAt, &item.activitySequence, &lastMessageID, &readSequence)
+		Scan(&item.ID, &item.Title, &item.Status, &item.CreatedAt, &item.UpdatedAt, &item.activitySequence, &lastMessageID, &readSequence, &item.UnreadCount)
 	if err == sql.ErrNoRows {
 		return Conversation{}, platform.Problem(http.StatusNotFound, "conversation_not_found", "会话不存在")
 	}
@@ -306,7 +308,9 @@ func (s *Service) Conversations(ctx context.Context, viewerID, rawCursor string,
 	}
 	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.title, c.status, c.created_at, c.updated_at, c.activity_sequence, COALESCE(c.last_message_id, '')
+		SELECT c.id, c.title, c.status, c.created_at, c.updated_at, c.activity_sequence, COALESCE(c.last_message_id, ''),
+ (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sequence > cm.read_sequence AND m.sender_id <> cm.user_id),
+ COALESCE((SELECT m.id FROM messages m WHERE m.conversation_id = c.id AND m.sequence = cm.read_sequence), '')
 		FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
 		WHERE cm.user_id = ? AND cm.left_at IS NULL AND c.status = 'active'`+where+`
 		ORDER BY c.activity_sequence DESC, c.id DESC LIMIT ?`, args...)
@@ -321,7 +325,7 @@ func (s *Service) Conversations(ctx context.Context, viewerID, rawCursor string,
 	partials := []partial{}
 	for rows.Next() {
 		var p partial
-		if err := rows.Scan(&p.item.ID, &p.item.Title, &p.item.Status, &p.item.CreatedAt, &p.item.UpdatedAt, &p.item.activitySequence, &p.lastMessageID); err != nil {
+		if err := rows.Scan(&p.item.ID, &p.item.Title, &p.item.Status, &p.item.CreatedAt, &p.item.UpdatedAt, &p.item.activitySequence, &p.lastMessageID, &p.item.UnreadCount, &p.item.LastReadMessageID); err != nil {
 			return nil, "", fmt.Errorf("scan conversation: %w", err)
 		}
 		partials = append(partials, p)
@@ -374,6 +378,9 @@ func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, cli
 		return Message{}, false, fmt.Errorf("begin message: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.lockActiveConversation(ctx, tx, conversationID, senderID); err != nil {
+		return Message{}, false, err
+	}
 	var active int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT 1 FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
@@ -539,7 +546,7 @@ func (s *Service) Events(ctx context.Context, userID, rawCursor string, limit in
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT n.sequence, n.id, n.type, n.subject_type, n.subject_id, n.payload,
-		       COALESCE(n.read_at, ''), n.created_at,
+		       COALESCE(n.read_at, ''), n.created_at, n.muted,
 		       COALESCE(u.id, ''), COALESCE(u.handle, ''), COALESCE(u.display_name, ''), COALESCE(u.avatar_url, '')
 		FROM notifications n LEFT JOIN users u ON u.id = n.actor_id
 		WHERE n.user_id = ? AND n.sequence > ? ORDER BY n.sequence ASC LIMIT ?`, userID, cursor.Sequence, limit+1)
@@ -554,7 +561,7 @@ func (s *Service) Events(ctx context.Context, userID, rawCursor string, limit in
 		var payload string
 		var actor Author
 		if err := rows.Scan(&event.sequence, &event.Notification.ID, &event.Notification.Type, &event.Notification.SubjectType,
-			&event.Notification.SubjectID, &payload, &event.Notification.ReadAt, &event.Notification.CreatedAt,
+			&event.Notification.SubjectID, &payload, &event.Notification.ReadAt, &event.Notification.CreatedAt, &event.Notification.Muted,
 			&actor.ID, &actor.Handle, &actor.DisplayName, &actor.AvatarURL); err != nil {
 			return nil, "", false, fmt.Errorf("scan reconnect event: %w", err)
 		}
@@ -584,13 +591,15 @@ func (s *Service) MarkConversationRead(ctx context.Context, conversationID, user
 		return ConversationReceipt{}, fmt.Errorf("begin conversation receipt: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.lockActiveConversation(ctx, tx, conversationID, userID); err != nil {
+		return ConversationReceipt{}, err
+	}
 	var currentSequence int64
-	var currentReadAt string
 	err = tx.QueryRowContext(ctx, `
-		SELECT cm.read_sequence, COALESCE(cm.read_at, '')
+		SELECT cm.read_sequence
 		FROM conversation_members cm JOIN conversations c ON c.id = cm.conversation_id
 		WHERE cm.conversation_id = ? AND cm.user_id = ? AND cm.left_at IS NULL AND c.status = 'active'`,
-		conversationID, userID).Scan(&currentSequence, &currentReadAt)
+		conversationID, userID).Scan(&currentSequence)
 	if err == sql.ErrNoRows {
 		return ConversationReceipt{}, platform.Problem(http.StatusNotFound, "conversation_not_found", "会话不存在")
 	}
@@ -598,16 +607,11 @@ func (s *Service) MarkConversationRead(ctx context.Context, conversationID, user
 		return ConversationReceipt{}, fmt.Errorf("authorize conversation receipt: %w", err)
 	}
 	targetSequence := int64(0)
-	targetMessageID := messageID
 	if messageID == "" {
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&targetSequence); err != nil {
 			return ConversationReceipt{}, fmt.Errorf("load latest conversation message: %w", err)
 		}
-		if targetSequence > 0 {
-			if err := tx.QueryRowContext(ctx, `SELECT id FROM messages WHERE conversation_id = ? AND sequence = ?`, conversationID, targetSequence).Scan(&targetMessageID); err != nil {
-				return ConversationReceipt{}, fmt.Errorf("load latest message id: %w", err)
-			}
-		}
+
 	} else {
 		if err := tx.QueryRowContext(ctx, `SELECT sequence FROM messages WHERE conversation_id = ? AND id = ?`, conversationID, messageID).Scan(&targetSequence); err == sql.ErrNoRows {
 			return ConversationReceipt{}, platform.Problem(http.StatusNotFound, "message_not_found", "消息不存在")
@@ -615,23 +619,39 @@ func (s *Service) MarkConversationRead(ctx context.Context, conversationID, user
 			return ConversationReceipt{}, fmt.Errorf("load receipt message: %w", err)
 		}
 	}
-	result := ConversationReceipt{ConversationID: conversationID, LastReadMessageID: targetMessageID, ReadAt: currentReadAt}
-	if targetSequence <= currentSequence {
-		if currentSequence > 0 {
-			_ = tx.QueryRowContext(ctx, `SELECT id FROM messages WHERE conversation_id = ? AND sequence = ?`, conversationID, currentSequence).Scan(&result.LastReadMessageID)
-		}
-		return result, nil
-	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE conversation_members SET read_sequence = ?, read_at = ? WHERE conversation_id = ? AND user_id = ? AND left_at IS NULL`,
-		targetSequence, now, conversationID, userID); err != nil {
-		return ConversationReceipt{}, fmt.Errorf("update conversation receipt: %w", err)
+	changed := int64(0)
+	if targetSequence > currentSequence {
+		update, err := tx.ExecContext(ctx, `UPDATE conversation_members SET read_sequence = ?, read_at = ? WHERE conversation_id = ? AND user_id = ? AND left_at IS NULL AND read_sequence < ?`, targetSequence, now, conversationID, userID, targetSequence)
+		if err != nil {
+			return ConversationReceipt{}, fmt.Errorf("update conversation receipt: %w", err)
+		}
+		changed, err = update.RowsAffected()
+		if err != nil {
+			return ConversationReceipt{}, fmt.Errorf("check conversation receipt: %w", err)
+		}
+	}
+	// Always reconcile badges against the effective receipt, including repeated
+	// and older requests. A no-op receipt is still an idempotent badge repair.
+	result := ConversationReceipt{ConversationID: conversationID, Changed: changed > 0}
+	var effectiveSequence int64
+	err = tx.QueryRowContext(ctx, `SELECT cm.read_sequence,COALESCE(cm.read_at,''),COALESCE(m.id,'')
+  FROM conversation_members cm LEFT JOIN messages m ON m.conversation_id=cm.conversation_id AND m.sequence=cm.read_sequence
+  WHERE cm.conversation_id=? AND cm.user_id=? AND cm.left_at IS NULL`, conversationID, userID).Scan(&effectiveSequence, &result.ReadAt, &result.LastReadMessageID)
+	if err == sql.ErrNoRows {
+		return ConversationReceipt{}, platform.Problem(http.StatusNotFound, "conversation_not_found", "会话不存在")
+	}
+	if err != nil {
+		return ConversationReceipt{}, fmt.Errorf("reload conversation receipt: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE notifications SET read_at = ?
+  WHERE user_id = ? AND type = 'message' AND subject_type = 'message' AND read_at IS NULL
+   AND subject_id IN (SELECT id FROM messages WHERE conversation_id = ? AND sequence <= ?)`, now, userID, conversationID, effectiveSequence); err != nil {
+		return ConversationReceipt{}, fmt.Errorf("clear read message notifications: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return ConversationReceipt{}, fmt.Errorf("commit conversation receipt: %w", err)
 	}
-	result.ReadAt = now
-	result.Changed = true
 	return result, nil
 }
 
@@ -641,6 +661,9 @@ func (s *Service) LeaveConversation(ctx context.Context, conversationID, userID 
 		return fmt.Errorf("begin leave conversation: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.lockActiveConversation(ctx, tx, conversationID, userID); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE conversation_members SET left_at = ?
 		WHERE conversation_id = ? AND user_id = ? AND left_at IS NULL
@@ -652,6 +675,14 @@ func (s *Service) LeaveConversation(ctx context.Context, conversationID, userID 
 	changed, _ := result.RowsAffected()
 	if changed == 0 {
 		return platform.Problem(http.StatusNotFound, "conversation_not_found", "会话不存在")
+	}
+	// Dismiss only this former member's message badges while retaining durable
+	// events and message history for the remaining participants.
+	if _, err := tx.ExecContext(ctx, `UPDATE notifications SET read_at = ?
+  WHERE user_id = ? AND type = 'message' AND subject_type = 'message' AND read_at IS NULL
+  AND subject_id IN (SELECT id FROM messages WHERE conversation_id = ?)`,
+		s.now().UTC().Format(time.RFC3339Nano), userID, conversationID); err != nil {
+		return fmt.Errorf("dismiss left conversation notifications: %w", err)
 	}
 	var activeMembers int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND left_at IS NULL`, conversationID).Scan(&activeMembers); err != nil {
@@ -799,4 +830,21 @@ func (s *Service) eventsHTTP(w http.ResponseWriter, r *http.Request) {
 		"reconnect": map[string]any{"transport": "poll", "retry_after_ms": 1500},
 		"meta":      map[string]string{"request_id": platform.RequestID(r.Context())},
 	})
+}
+
+// lockActiveConversation is the shared serialization boundary for sending,
+// receipts and leaving. It is held until message notifications or dismissal
+// commit, so a recipient cannot leave between recipient selection and insert.
+func (s *Service) lockActiveConversation(ctx context.Context, tx *sql.Tx, conversationID, userID string) error {
+	var id string
+	err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT c.id FROM conversations c
+  WHERE c.id=? AND c.status='active' AND EXISTS(SELECT 1 FROM conversation_members cm
+   WHERE cm.conversation_id=c.id AND cm.user_id=? AND cm.left_at IS NULL)`), conversationID, userID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return platform.Problem(http.StatusNotFound, "conversation_not_found", "会话不存在")
+	}
+	if err != nil {
+		return fmt.Errorf("lock active conversation: %w", err)
+	}
+	return nil
 }

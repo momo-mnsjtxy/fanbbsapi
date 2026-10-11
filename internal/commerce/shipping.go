@@ -93,6 +93,9 @@ func (s *Service) CreateShippingAddress(ctx context.Context, userID string, inpu
 		return ShippingAddress{}, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return ShippingAddress{}, err
+	}
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM shipping_addresses WHERE user_id=?`, userID).Scan(&count); err != nil {
 		return ShippingAddress{}, err
@@ -131,6 +134,9 @@ func (s *Service) UpdateShippingAddress(ctx context.Context, addressID, userID s
 		return ShippingAddress{}, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return ShippingAddress{}, err
+	}
 	var currentVersion, currentDefault int
 	if err := tx.QueryRowContext(ctx, `SELECT version,is_default FROM shipping_addresses WHERE id=? AND user_id=?`, addressID, userID).Scan(&currentVersion, &currentDefault); err == sql.ErrNoRows {
 		return ShippingAddress{}, platform.Problem(http.StatusNotFound, "shipping_address_not_found", "收货地址不存在")
@@ -174,6 +180,9 @@ func (s *Service) DeleteShippingAddress(ctx context.Context, addressID, userID s
 		return err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return err
+	}
 	var wasDefault int
 	if err := tx.QueryRowContext(ctx, `SELECT is_default FROM shipping_addresses WHERE id=? AND user_id=?`, addressID, userID).Scan(&wasDefault); err == sql.ErrNoRows {
 		return platform.Problem(http.StatusNotFound, "shipping_address_not_found", "收货地址不存在")

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -23,12 +24,27 @@ type Notification struct {
 	Payload     json.RawMessage `json:"payload"`
 	ReadAt      string          `json:"read_at,omitempty"`
 	CreatedAt   string          `json:"created_at"`
+	Muted       bool            `json:"muted"`
 	Actor       *Author         `json:"actor,omitempty"`
 }
 
 func addNotification(ctx context.Context, tx *sql.Tx, recipientID, actorID, kind, subjectType, subjectID string, payload any, now time.Time) error {
 	if recipientID == "" || recipientID == actorID {
 		return nil
+	}
+	// Preferences affect future optional inbox visibility only. Durable events
+	// still exist for reconnect synchronization, with muted=true to suppress alerts. Moderation notices
+	// remain mandatory so decisions and account consequences are never hidden.
+	muted := 0
+	if kind != "moderation" {
+		var enabled int
+		err := tx.QueryRowContext(ctx, `SELECT enabled FROM notification_preferences WHERE user_id = ? AND type = ?`, recipientID, kind).Scan(&enabled)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("read notification preference: %w", err)
+		}
+		if err == nil && enabled == 0 {
+			muted = 1
+		}
 	}
 	notificationID, err := platform.NewID("ntf")
 	if err != nil {
@@ -39,34 +55,62 @@ func addNotification(ctx context.Context, tx *sql.Tx, recipientID, actorID, kind
 		return fmt.Errorf("encode notification payload: %w", err)
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO notifications(id, user_id, type, actor_id, subject_type, subject_id, payload, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, notificationID, recipientID, kind, actorID, subjectType, subjectID, string(encoded), now.UTC().Format(time.RFC3339Nano))
+		INSERT INTO notifications(id, user_id, type, actor_id, subject_type, subject_id, payload, created_at, muted)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, notificationID, recipientID, kind, actorID, subjectType, subjectID, string(encoded), now.UTC().Format(time.RFC3339Nano), muted)
 	if err != nil {
 		return fmt.Errorf("create notification: %w", err)
 	}
 	return nil
 }
 
-func (s *Service) Notifications(ctx context.Context, userID string, unreadOnly bool, offset, limit int) ([]Notification, string, error) {
-	where := `n.user_id = ?`
+// Notifications uses a recipient/filter-scoped seek cursor. Reading a page,
+// marking its items read, or receiving new events cannot shift the next page.
+func (s *Service) Notifications(ctx context.Context, userID string, unreadOnly bool, kind, rawCursor string, limit int) ([]Notification, string, error) {
+	if limit < 1 || limit > 50 {
+		return nil, "", platform.Validation(map[string][]string{"limit": {"limit 必须是 1 到 50 的整数"}})
+	}
+	if kind != "" && !validNotificationKind(kind) {
+		return nil, "", platform.Validation(map[string][]string{"type": {"通知类型无效"}})
+	}
+	scope := fmt.Sprintf("notifications:%s:%t:%s", userID, unreadOnly, kind)
+	cursor, err := decodeSeekCursor(rawCursor, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	if cursor.Timestamp != "" || cursor.ID != "" || (rawCursor != "" && cursor.Sequence == 0) {
+		return nil, "", platform.Validation(map[string][]string{"cursor": {"游标无效"}})
+	}
+	boundary := int64(math.MaxInt64)
+	if rawCursor != "" {
+		boundary = cursor.Sequence
+	}
+	where := `n.user_id = ? AND n.sequence < ? AND n.muted = 0`
+	args := []any{userID, boundary}
 	if unreadOnly {
 		where += ` AND n.read_at IS NULL`
 	}
+	if kind != "" {
+		where += ` AND n.type = ?`
+		args = append(args, kind)
+	}
+	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT n.id, n.type, n.subject_type, n.subject_id, n.payload, COALESCE(n.read_at, ''), n.created_at,
-		       COALESCE(u.id, ''), COALESCE(u.handle, ''), COALESCE(u.display_name, ''), COALESCE(u.avatar_url, '')
-		FROM notifications n LEFT JOIN users u ON u.id = n.actor_id
-		WHERE `+where+` ORDER BY n.created_at DESC, n.id DESC LIMIT ? OFFSET ?`, userID, limit+1, offset)
+  SELECT n.sequence, n.id, n.type, n.subject_type, n.subject_id, n.payload, COALESCE(n.read_at, ''), n.created_at,
+         COALESCE(u.id, ''), COALESCE(u.handle, ''), COALESCE(u.display_name, ''), COALESCE(u.avatar_url, '')
+  FROM notifications n LEFT JOIN users u ON u.id = n.actor_id
+  WHERE `+where+` ORDER BY n.sequence DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("list notifications: %w", err)
 	}
 	defer rows.Close()
 	items := make([]Notification, 0, limit+1)
+	sequences := make([]int64, 0, limit+1)
 	for rows.Next() {
 		var item Notification
 		var actor Author
 		var payload string
-		if err := rows.Scan(&item.ID, &item.Type, &item.SubjectType, &item.SubjectID, &payload, &item.ReadAt, &item.CreatedAt,
+		var sequence int64
+		if err := rows.Scan(&sequence, &item.ID, &item.Type, &item.SubjectType, &item.SubjectID, &payload, &item.ReadAt, &item.CreatedAt,
 			&actor.ID, &actor.Handle, &actor.DisplayName, &actor.AvatarURL); err != nil {
 			return nil, "", fmt.Errorf("scan notification: %w", err)
 		}
@@ -76,11 +120,12 @@ func (s *Service) Notifications(ctx context.Context, userID string, unreadOnly b
 			item.Actor = &actor
 		}
 		items = append(items, item)
+		sequences = append(sequences, sequence)
 	}
 	next := ""
 	if len(items) > limit {
 		items = items[:limit]
-		next = platform.EncodeCursor(offset + limit)
+		next = encodeSeekCursor(seekCursor{Scope: scope, Sequence: sequences[limit-1]})
 	}
 	return items, next, rows.Err()
 }
@@ -113,14 +158,19 @@ func (s *Service) MarkNotificationsRead(ctx context.Context, userID string, ids 
 }
 
 func (s *Service) notificationsHTTP(w http.ResponseWriter, r *http.Request) {
-	offset, limit, err := pagination(r)
+	limit, err := validateLimit(r.URL.Query().Get("limit"))
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return
 	}
 	current, _ := identity.UserFromContext(r.Context())
-	unread := r.URL.Query().Get("unread") == "true"
-	items, next, err := s.Notifications(r.Context(), current.ID, unread, offset, limit)
+	unreadValue := r.URL.Query().Get("unread")
+	if unreadValue != "" && unreadValue != "true" && unreadValue != "false" {
+		platform.WriteError(w, r, platform.Validation(map[string][]string{"unread": {"unread 必须是 true 或 false"}}))
+		return
+	}
+	unread := unreadValue == "true"
+	items, next, err := s.Notifications(r.Context(), current.ID, unread, r.URL.Query().Get("type"), r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return

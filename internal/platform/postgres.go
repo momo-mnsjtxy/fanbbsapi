@@ -289,3 +289,14 @@ func postgresQuery(query string) string {
 	}
 	return out.String()
 }
+
+// ForNoKeyUpdate serializes non-key changes without blocking foreign-key
+// checks that acquire KEY SHARE locks. SQLite's supported
+// local adapter has one connection and already serializes transactions. Call
+// this only for primary-row SELECT statements inside an existing transaction.
+func ForNoKeyUpdate(db *sql.DB, query string) string {
+	if _, postgres := db.Driver().(*stdlib.Driver); postgres {
+		return query + " FOR NO KEY UPDATE"
+	}
+	return query
+}

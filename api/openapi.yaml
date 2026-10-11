@@ -658,19 +658,122 @@ paths:
       parameters: [{$ref: '#/components/parameters/UserID'}]
       responses:
         '200': {$ref: '#/components/responses/Interaction'}
+  /me/posts:
+    get:
+      summary: List the current author's published and unpublished submissions
+      description: Owner/status-scoped seek pagination; deleted posts are excluded. Public feeds never expose these unpublished rows.
+      operationId: listMyPosts
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [published, pending, rejected, draft]}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/PostList'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /me/posts/{post_id}:
+    get:
+      summary: Inspect an author's own submission and private review reason
+      operationId: getMyPost
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200':
+          description: Consistent owner post/review snapshot with the post version in ETag
+          headers:
+            ETag: {schema: {type: string}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: object
+                    required: [post]
+                    properties:
+                      post: {$ref: '#/components/schemas/Post'}
+                      moderation:
+                        type: object
+                        required: [post_id, state, pinned, recommended]
+                        properties:
+                          post_id: {type: string}
+                          state: {type: string, enum: [pending, published, rejected]}
+                          pinned: {type: boolean}
+                          recommended: {type: boolean}
+                          reason: {type: string}
+                          decided_by: {type: string}
+                          decided_at: {type: string, format: date-time}
+                  meta: {$ref: '#/components/schemas/Meta'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /notifications:
     get:
-      summary: List durable notifications owned by the current user
+      summary: List unmuted durable notifications owned by the current user
+      description: Newest sequence first. The cursor is scoped to owner, unread and type; marking earlier items read or receiving new events cannot shift later pages.
       operationId: listNotifications
       security: [{bearerAuth: []}]
       parameters:
         - {name: unread, in: query, schema: {type: boolean, default: false}}
+        - {name: type, in: query, schema: {type: string, enum: [comment, like, repost, follow, moderation, message]}}
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/Limit'}
       responses:
         '200':
           description: Notification page
           content: {application/json: {schema: {$ref: '#/components/schemas/NotificationListEnvelope'}}}
+  /notifications/counts:
+    get:
+      summary: Get owner-scoped unread inbox badges by kind in one database snapshot
+      operationId: notificationUnreadCounts
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Counts exclude future muted events; previously visible history is unchanged
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationCountsEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /me/notification-preferences:
+    get:
+      summary: Read the current user's complete notification preferences
+      operationId: getNotificationPreferences
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Missing stored preferences default to true; moderation is always true
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationPreferencesEnvelope'}}}
+        '401': {$ref: '#/components/responses/Error'}
+    patch:
+      summary: Atomically patch future optional inbox notifications
+      description: Muted events stay in /events for synchronization with muted=true; clients must suppress alerts for them. Existing inbox history is unchanged. Moderation notices cannot be changed. Null values, unknown types and empty patches are rejected.
+      operationId: updateNotificationPreferences
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preferences]
+              properties:
+                preferences:
+                  type: object
+                  minProperties: 1
+                  additionalProperties: false
+                  properties:
+                    comment: {type: boolean}
+                    like: {type: boolean}
+                    repost: {type: boolean}
+                    follow: {type: boolean}
+                    message: {type: boolean}
+      responses:
+        '200':
+          description: Complete effective preferences after the patch
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationPreferencesEnvelope'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /notifications/read:
     put:
       summary: Idempotently mark selected notifications, or all when ids is empty, read
@@ -687,6 +790,29 @@ paths:
                 ids: {type: array, maxItems: 100, items: {type: string}}
       responses:
         '200': {$ref: '#/components/responses/Interaction'}
+  /conversations/counts:
+    get:
+      summary: Count unread messages and conversations for active memberships
+      description: Excludes the current user's own messages and left memberships. Inbox muting does not change authoritative chat unread counts.
+      operationId: conversationUnreadCounts
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Owner-scoped chat badges in one query snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: object
+                    required: [conversations, messages]
+                    properties:
+                      conversations: {type: integer, minimum: 0}
+                      messages: {type: integer, minimum: 0}
+                  meta: {$ref: '#/components/schemas/Meta'}
+        '401': {$ref: '#/components/responses/Error'}
   /conversations:
     get:
       summary: List the current user's active conversations, newest activity first
@@ -1197,6 +1323,28 @@ paths:
         '200': {description: Active device sessions, content: {application/json: {schema: {$ref: '#/components/schemas/DeviceSessionListEnvelope'}}}}
         '401': {$ref: '#/components/responses/Error'}
   /me/sessions/{session_id}:
+    patch:
+      summary: Rename an active session owned by the current user
+      description: Empty name clears the optional label. The name survives refresh-token rotation. No fingerprint, IP address or location is collected.
+      operationId: renameMyDeviceSession
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/SessionID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: {type: string, maxLength: 80}
+      responses:
+        '200': {$ref: '#/components/responses/Interaction'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
     delete:
       summary: Revoke one device session owned by the current user
       operationId: revokeMyDeviceSession
@@ -2005,7 +2153,7 @@ components:
         sender: {$ref: '#/components/schemas/Author'}
     Conversation:
       type: object
-      required: [id, title, status, created_at, updated_at, members]
+      required: [id, title, status, created_at, updated_at, members, unread_count]
       properties:
         id: {type: string}
         title: {type: string}
@@ -2015,6 +2163,7 @@ components:
         members: {type: array, items: {$ref: '#/components/schemas/ConversationMember'}}
         last_message: {$ref: '#/components/schemas/Message'}
         last_read_message_id: {type: string}
+        unread_count: {type: integer, minimum: 0}
     CreateConversation:
       type: object
       required: [member_ids]
@@ -2061,7 +2210,7 @@ components:
         meta: {$ref: '#/components/schemas/Meta'}
     Notification:
       type: object
-      required: [id, type, subject_type, subject_id, payload, created_at]
+      required: [id, type, subject_type, subject_id, payload, created_at, muted]
       properties:
         id: {type: string}
         type: {type: string, enum: [comment, like, repost, follow, moderation, message]}
@@ -2070,7 +2219,42 @@ components:
         payload: {type: object, additionalProperties: true}
         read_at: {type: string, format: date-time}
         created_at: {type: string, format: date-time}
+        muted: {type: boolean, description: True only for silent reconnect synchronization events; suppress alerts.}
         actor: {$ref: '#/components/schemas/Author'}
+    NotificationCountsEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [total, by_type]
+          properties:
+            total: {type: integer, minimum: 0}
+            by_type:
+              type: object
+              required: [comment, like, repost, follow, moderation, message]
+              additionalProperties: {type: integer, minimum: 0}
+        meta: {$ref: '#/components/schemas/Meta'}
+    NotificationPreferencesEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [preferences]
+          properties:
+            preferences:
+              type: object
+              additionalProperties: false
+              required: [comment, like, repost, follow, moderation, message]
+              properties:
+                comment: {type: boolean}
+                like: {type: boolean}
+                repost: {type: boolean}
+                follow: {type: boolean}
+                moderation: {type: boolean, const: true}
+                message: {type: boolean}
+        meta: {$ref: '#/components/schemas/Meta'}
     NotificationListEnvelope:
       type: object
       required: [data, page, meta]
@@ -2304,9 +2488,11 @@ components:
         meta: {$ref: '#/components/schemas/Meta'}
     DeviceSession:
       type: object
-      required: [id, current, access_expires_at, refresh_expires_at, created_at]
+      required: [id, name, last_active_at, current, access_expires_at, refresh_expires_at, created_at]
       properties:
         id: {type: string}
+        name: {type: string, maxLength: 80}
+        last_active_at: {type: string, format: date-time, description: Coarse activity checkpoint persisted at most once per minute.}
         current: {type: boolean}
         access_expires_at: {type: string, format: date-time}
         refresh_expires_at: {type: string, format: date-time}

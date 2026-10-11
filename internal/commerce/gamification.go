@@ -32,7 +32,7 @@ func awardPoints(ctx context.Context, tx *sql.Tx, userID, eventType, eventKey, d
 	if _, err := tx.ExecContext(ctx, `INSERT INTO local_point_events(id,user_id,amount,event_type,event_key,description,created_at) VALUES(?,?,?,?,?,?,?)`, id, userID, amount, eventType, eventKey, description, stamp); err != nil {
 		return "", false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO user_points(user_id,balance,lifetime_points,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET balance=balance+excluded.balance,lifetime_points=lifetime_points+excluded.lifetime_points,updated_at=excluded.updated_at`, userID, amount, amount, stamp); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_points(user_id,balance,lifetime_points,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET balance=user_points.balance+excluded.balance,lifetime_points=user_points.lifetime_points+excluded.lifetime_points,updated_at=excluded.updated_at`, userID, amount, amount, stamp); err != nil {
 		return "", false, fmt.Errorf("update local points: %w", err)
 	}
 	return id, false, nil
@@ -46,6 +46,9 @@ func (s *Service) CheckIn(ctx context.Context, userID string) (PointEvent, bool,
 		return PointEvent{}, false, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return PointEvent{}, false, err
+	}
 	var event PointEvent
 	err = tx.QueryRowContext(ctx, `SELECT e.id,e.amount,e.event_type,e.event_key,e.description,e.created_at FROM daily_checkins c JOIN local_point_events e ON e.id=c.point_event_id WHERE c.user_id=? AND c.checkin_date=?`, userID, day).Scan(&event.ID, &event.Amount, &event.EventType, &event.EventKey, &event.Description, &event.CreatedAt)
 	if err == nil {
@@ -322,6 +325,9 @@ func (s *Service) AwardTask(ctx context.Context, actor identity.User, requestID,
 		return Task{}, false, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return Task{}, false, err
+	}
 	var userExists int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id=? AND status='active'`, userID).Scan(&userExists); err != nil {
 		return Task{}, false, err
@@ -522,6 +528,9 @@ func (s *Service) GrantFrame(ctx context.Context, actor identity.User, requestID
 		return AvatarFrame{}, false, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return AvatarFrame{}, false, err
+	}
 	var userExists int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id=? AND status='active'`, userID).Scan(&userExists); err != nil {
 		return AvatarFrame{}, false, err
@@ -596,6 +605,9 @@ func (s *Service) GrantPoints(ctx context.Context, actor identity.User, requestI
 		return PointEvent{}, false, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return PointEvent{}, false, err
+	}
 	var userExists int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id=? AND status='active'`, userID).Scan(&userExists); err != nil {
 		return PointEvent{}, false, err

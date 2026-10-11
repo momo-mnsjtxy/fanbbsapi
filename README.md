@@ -1,6 +1,6 @@
 # FanBBS Go API
 
-This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps the original `../../backend` Java snapshot untouched. HOP informed the shallow, subject-oriented layout and linear request flow; it is not linked, vendored, or copied as a Go framework.
+This is a runnable local vertical slice of the approved FanBBS rewrite, independent of the original Java snapshot. HOP informed the shallow, subject-oriented layout and linear request flow; it is not linked, vendored, or copied as a Go framework.
 
 ## Included
 
@@ -11,7 +11,7 @@ This is a runnable local vertical slice of the approved FanBBS rewrite. It keeps
 - Bounded local-filesystem media uploads behind a blob interface, post attachment, avatar upload/reference flow, owner-scoped abandonment, and retryable orphan expiry cleanup
 - Transaction-safe, idempotent like/unlike and repost/undo-repost operations
 - Private owner-only bookmarks, explicit private/public curated collections with viewer-aware contents, idempotent follows, separate categories/tags, and viewer-aware search
-- Durable owner-scoped notifications, including private-message notifications, generated inside source transactions
+- Durable owner-scoped notifications, including private-message notifications, generated inside source transactions; per-kind unread counts, atomic future-event preferences, and owner/filter-scoped seek pagination
 - Database-backed, membership-scoped private conversations and messages with sender idempotency, opaque cursors, monotonic read receipts, safe leave lifecycle, and HTTP polling checkpoints for reconnects
 - Public profiles/follower lists, block-aware visibility, category follows, category/tag feed filters, device-session management, and profile covers
 - Versioned local homepage/carousel operations configuration with `If-Match`, admin RBAC, media references, and immutable audit
@@ -28,16 +28,12 @@ SQLite remains the local-development adapter. PostgreSQL 17 is the production da
 
 ## Run
 
-The checked environment has Go at `/tmp/go1.26.5/bin/go`. Dependencies are already in the workspace module cache.
+Use Go 1.26 or newer with CGO enabled and a C compiler for the SQLite adapter. The October 11 continuation was verified with Go 1.26.9 and PostgreSQL 17.11. `make` accepts `GO=/path/to/go` when your toolchain is not on PATH.
 
 ```sh
-cd fanbbs-rewrite/backend
-mkdir -p .cache/go-build
-export GOPATH=/workspace/scratch/e5152f2a16c1/.gitea-gopath
-export GOCACHE="$PWD/.cache/go-build"
-export GOMAXPROCS=1 GOGC=25 GOMEMLIMIT=768MiB
-export GOPROXY=off GOSUMDB=off CGO_ENABLED=1
-/tmp/go1.26.5/bin/go run ./cmd/api
+cd /path/to/fanbbsapi
+export CGO_ENABLED=1
+go run ./cmd/api
 ```
 
 Configuration:
@@ -71,19 +67,19 @@ Run a bounded orphan-media cleanup pass (suitable for deployment cron):
 FANBBS_DB=fanbbs.db FANBBS_BLOB_DIR=data/blobs go run ./cmd/worker
 ```
 
-PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `010`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
+PostgreSQL migrations live under `migrations/postgres`, mirror SQLite versions `001` through `012`, take a transaction-scoped advisory lock, and reject checksum drift. GitHub Actions starts PostgreSQL 17 and runs the real adapter rehearsal with `FANBBS_TEST_POSTGRES_DSN`.
 
 The CI workflow also creates logical SQLite and PostgreSQL backups from synthetic databases, restores both into separate targets, and compares migration integrity. See `docs/operations.md` and `scripts/rehearse_backup_restore.sh`; the script has no production target or credentials built in.
 
 ## Verify
 
 ```sh
-find cmd internal migrations -name '*.go' -print0 | xargs -0 /tmp/go1.26.5/bin/gofmt -w
-/tmp/go1.26.5/bin/go test ./...
-/tmp/go1.26.5/bin/go vet ./...
+go test ./...
+go vet ./...
+go test -race ./internal/app ./internal/community ./internal/commerce
 ```
 
-The integration suite uses a real temporary SQLite database and CI PostgreSQL 17 service. The PostgreSQL rehearsal covers all ten migrations and idempotent reapplication, registration/login/authentication, follower visibility and feed reads, idempotent post/comment writes, reactions, optimistic edits, deterministic synthetic import reconciliation/quarantine/replay, target-conflict quarantine without an aborted PostgreSQL transaction, dry-run rollback, and trigger-forced import rollback. The broader SQLite suite covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
+The integration suite uses a real temporary SQLite database and CI PostgreSQL 17 service. The PostgreSQL rehearsal covers all twelve migrations and idempotent reapplication, registration/login/authentication, follower visibility and feed reads, idempotent post/comment writes, reactions, optimistic edits, deterministic synthetic import reconciliation/quarantine/replay, target-conflict quarantine without an aborted PostgreSQL transaction, dry-run rollback, and trigger-forced import rollback. The broader SQLite suite covers registration/profile/password/deactivation and one-time recovery, all four feeds, cross-user follower visibility, create/detail/comments/replies, versioned revision history, taxonomy/search, bookmarks/follows, durable notifications, pending-post moderation and feed controls, moderator/admin RBAC, immutable audits, idempotency, security headers, local metrics/rate limits, and forced counter/audit failures that prove source transactions roll back. It also covers messaging membership masking, conversation reuse, message replay/conflicts, scoped cursors, poll-based reconnect events, admin user/content filters, suspension session revocation/reactivation, audited taxonomy conflicts/in-use deletion, and audit-failure rollback.
 
 It also covers upload MIME/ownership/visibility and public/private cache policy, avatar/cover references, device-session ownership/revocation, public-profile and block visibility, category follows/feed filters, monotonic read receipts and safe conversation leave, homepage version/audit rollback, stale post/comment writes, comment reactions, moderated counter/repost cleanup, and deterministic synthetic legacy import with quarantine/count reconciliation.
 
@@ -94,16 +90,16 @@ The commerce/gamification integration cases cover admin RBAC, public catalog rea
 `cmd/importlegacy` has no legacy-network or MySQL capability. It refuses to open the target database until both `--synthetic` is passed and the JSON document declares `"source":"synthetic"` with `mapping_version: 1`. It accepts either the normalized fixture layout or `--format fanbbs-java`, an authentic row-shaped fixture that must additionally declare `"schema":"fanbbs-java-installcontroller-v1"`. The target can be local SQLite or the configured PostgreSQL adapter.
 
 ```sh
-/tmp/go1.26.5/bin/go run ./cmd/importlegacy \
+go run ./cmd/importlegacy \
   --synthetic --input ./path/to/generated-fixture.json --db ./rehearsal.db
 
-/tmp/go1.26.5/bin/go run ./cmd/importlegacy \
+go run ./cmd/importlegacy \
   --synthetic --format fanbbs-java \
   --input ./path/to/generated-authentic-shape-fixture.json --db ./rehearsal.db
 
 # Exercise the complete mapping, target-conflict checks and reconciliation,
 # then roll back all application, import-run and quarantine rows.
-/tmp/go1.26.5/bin/go run ./cmd/importlegacy \
+go run ./cmd/importlegacy \
   --synthetic --dry-run --format fanbbs-java \
   --input ./path/to/generated-authentic-shape-fixture.json --db ./rehearsal.db
 ```
@@ -156,3 +152,33 @@ migrations              embedded SQLite and PostgreSQL schema sources of truth
 api/openapi.yaml        public API contract
 docs/remaining-features.md
 ```
+
+## Inbox preferences and pagination
+
+`GET /api/v1/notifications/counts` returns total and all six per-kind unread counts in one query. `GET/PATCH /api/v1/me/notification-preferences` reads or atomically updates optional booleans under `preferences` (`comment`, `like`, `repost`, `follow`, `message`). Defaults are enabled; moderation notices remain mandatory. Changes affect future events only. Muted events do not appear in the inbox or badges, but remain in the reconnect log with `muted: true` so chat synchronization is not lost. Clients must suppress alerts for muted events.
+
+Notification list cursors are sequence-based and scoped to the current owner, unread filter and optional type filter. Keep the same filters on subsequent pages. New events and marking earlier pages read do not shift the remaining page. Old offset cursors are intentionally rejected; restart the list without a cursor after upgrading.
+
+`PG_BIN=/path/to/postgres/bin GO=/path/to/go scripts/test-postgres-local.sh` creates a fresh loopback-only disposable PostgreSQL cluster, executes adapter tests and stops it through an EXIT trap. It never accepts a production DSN. The stopped cluster data is removed; the retained directory contains logs for inspection.
+
+## Chat unread consistency
+
+Conversation list/detail responses include viewer-specific `unread_count` and the list now includes `last_read_message_id`. `GET /api/v1/conversations/counts` returns unread conversation/message totals for active memberships, excluding the viewer's own messages. Muting inbox notices does not erase unread chat state. Advancing a read receipt clears the corresponding message inbox badges in the same transaction; leaving dismisses only that member's badges. PostgreSQL conditional updates prevent older concurrent receipts from moving the checkpoint backwards. Forced badge-update failures prove receipt/leave rollback.
+
+## Device-session labels and activity
+
+Owners can `PATCH /api/v1/me/sessions/{session_id}` with `{"name":"My laptop"}` (up to 80 Unicode characters; empty clears the label). Unknown, expired, revoked and foreign sessions are masked as not found. Labels survive refresh rotation within the rotation transaction. Session lists include `name` and `last_active_at`, sorted by recent activity. Authentication updates coarse activity at most once per minute and never moves it backwards. No user-agent fingerprint, IP address or location is collected.
+
+## PostgreSQL transaction contention
+
+Local non-payment cart, checkout, shipping-address defaults and non-cash award transactions now acquire an owner-row `FOR NO KEY UPDATE` lock on PostgreSQL before read/check/write decisions. SQLite remains single-connection. This serializes same-owner requests without blocking unrelated foreign-key checks. Order transitions lock their order row before restoring inventory, preventing concurrent cancellations from restoring it twice. The point-balance upsert qualifies existing columns for both adapters.
+
+Real PostgreSQL tests cover twelve competing same-key checkouts, different-key checkout races on one cart, concurrent cancellation, daily check-in and task awards, concurrent default-address changes, and forced-audit rollback. These use synthetic data and no payment or live fulfillment integration. Production volume, latency and deployment acceptance remain separate.
+
+## Private author workspace
+
+`GET /api/v1/me/posts` lists the author's own undeleted submissions with optional `published`, `pending`, `rejected` or `draft` filtering and owner/filter-scoped seek cursors. `GET /api/v1/me/posts/{post_id}` returns a consistent `post` plus optional `moderation` snapshot, including a rejection reason and ETag. This closes the gap where a submitted pending post could be read only in its creation response. Foreign owners and public post endpoints still cannot read unpublished content. Resubmission/appeals and edits during review remain separate policy decisions.
+
+### Receipt replay and concurrent leave
+
+Receipt replay reconciles message badges against the effective stored checkpoint even when the requested checkpoint is equal or older (`changed` remains false). Sending, reading and leaving acquire the same per-conversation transaction lock on PostgreSQL. A recipient cannot leave between recipient selection and notification insertion, and a send cannot pass a stale active-member check then commit without recipients. Deterministic PostgreSQL tests pause both message insertion and notification insertion with an advisory-lock gate; leave waits, then clears the committed badge. No data backfill or old-version compatibility path is involved.

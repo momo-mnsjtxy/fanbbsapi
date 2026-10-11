@@ -28,6 +28,7 @@ func (s *Service) RegisterAccountRoutes(router chi.Router) {
 	router.Post("/me/recovery-codes/rotate", s.rotateRecoveryCodesHTTP)
 	router.Get("/me/sessions", s.sessionsHTTP)
 	router.Delete("/me/sessions/{sessionID}", s.revokeSessionHTTP)
+	router.Patch("/me/sessions/{sessionID}", s.renameSessionHTTP)
 	router.Delete("/me", s.deactivate)
 	router.Delete("/me/account", s.deactivate)
 }

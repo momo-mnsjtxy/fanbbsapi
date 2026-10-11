@@ -1,4 +1,4 @@
-GO ?= /tmp/go1.26.5/bin/go
+GO ?= go
 
 .PHONY: test vet run migrate
 

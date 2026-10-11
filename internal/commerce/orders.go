@@ -33,7 +33,18 @@ func (s *Service) SetCartItem(ctx context.Context, userID, productID string, qua
 	if quantity < 1 || quantity > 100 {
 		return CartItem{}, platform.Validation(map[string][]string{"quantity": {"必须在 1 到 100 之间"}})
 	}
-	product, err := s.Product(ctx, productID, false)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CartItem{}, err
+	}
+	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return CartItem{}, err
+	}
+	product, err := scanProduct(tx.QueryRowContext(ctx, productSelect+` WHERE p.id = ? AND p.status = 'active' AND t.status = 'active'`, productID))
+	if err == sql.ErrNoRows {
+		return CartItem{}, platform.Problem(http.StatusNotFound, "product_not_found", "商品不存在")
+	}
 	if err != nil {
 		return CartItem{}, err
 	}
@@ -41,20 +52,36 @@ func (s *Service) SetCartItem(ctx context.Context, userID, productID string, qua
 		return CartItem{}, platform.Problem(http.StatusConflict, "insufficient_inventory", "库存不足")
 	}
 	stamp := s.now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO cart_items(user_id,product_id,quantity,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id,product_id) DO UPDATE SET quantity=excluded.quantity,updated_at=excluded.updated_at`, userID, productID, quantity, stamp)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO cart_items(user_id,product_id,quantity,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id,product_id) DO UPDATE SET quantity=excluded.quantity,updated_at=excluded.updated_at`, userID, productID, quantity, stamp); err != nil {
 		return CartItem{}, fmt.Errorf("set cart item: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return CartItem{}, err
 	}
 	return CartItem{Product: product, Quantity: quantity, UpdatedAt: stamp}, nil
 }
 
 func (s *Service) DeleteCartItem(ctx context.Context, userID, productID string) (bool, error) {
-	r, err := s.db.ExecContext(ctx, `DELETE FROM cart_items WHERE user_id=? AND product_id=?`, userID, productID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	n, _ := r.RowsAffected()
-	return n > 0, nil
+	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM cart_items WHERE user_id=? AND product_id=?`, userID, productID)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return changed > 0, nil
 }
 
 func scanOrder(row interface{ Scan(...any) error }) (Order, error) {
@@ -213,6 +240,9 @@ func (s *Service) CreateOrderWithAddress(ctx context.Context, userID, idempotenc
 		return Order{}, false, err
 	}
 	defer tx.Rollback()
+	if err := s.lockUser(ctx, tx, userID); err != nil {
+		return Order{}, false, err
+	}
 	var existing string
 	err = tx.QueryRowContext(ctx, `SELECT resource_id FROM idempotency_keys WHERE user_id=? AND scope='create_order' AND key=?`, userID, idempotencyKey).Scan(&existing)
 	if err == nil {
@@ -342,7 +372,7 @@ func (s *Service) TransitionOrder(ctx context.Context, actor identity.User, requ
 		query += ` AND user_id=?`
 		args = append(args, actor.ID)
 	}
-	before, err := scanOrder(tx.QueryRowContext(ctx, query, args...))
+	before, err := scanOrder(tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, query), args...))
 	if err == sql.ErrNoRows {
 		return Order{}, false, platform.Problem(http.StatusNotFound, "order_not_found", "订单不存在")
 	}

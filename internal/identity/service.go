@@ -345,6 +345,11 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 	if changed != 1 {
 		return Session{}, platform.Problem(http.StatusUnauthorized, "invalid_refresh_token", "刷新令牌无效或已使用")
 	}
+	// Copy the owner label only after claiming the old session row. This
+	// serializes with a concurrent rename instead of copying an earlier snapshot.
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET device_name = (SELECT device_name FROM sessions WHERE id = ?) WHERE id = ?`, oldSessionID, newSession.SessionID); err != nil {
+		return Session{}, fmt.Errorf("preserve rotated device label: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return Session{}, fmt.Errorf("commit refresh: %w", err)
 	}
@@ -357,13 +362,14 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (User, s
 	}
 	var user User
 	var sessionID, expiresAt string
+	var lastActive int64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT s.id, s.access_expires_at, u.id, u.handle, u.email, u.display_name,
-		       u.avatar_url, u.bio, u.role, u.status, u.created_at
+		       u.avatar_url, u.bio, u.role, u.status, u.created_at, s.last_active_unix
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.access_hash = ? AND s.revoked_at IS NULL`, tokenHash(accessToken)).Scan(
 		&sessionID, &expiresAt, &user.ID, &user.Handle, &user.Email, &user.DisplayName,
-		&user.AvatarURL, &user.Bio, &user.Role, &user.Status, &user.CreatedAt,
+		&user.AvatarURL, &user.Bio, &user.Role, &user.Status, &user.CreatedAt, &lastActive,
 	)
 	if err == sql.ErrNoRows {
 		return User{}, "", platform.Problem(http.StatusUnauthorized, "invalid_access_token", "登录凭证无效")
@@ -377,6 +383,14 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (User, s
 	}
 	if user.Status != "active" {
 		return User{}, "", platform.Problem(http.StatusForbidden, "account_suspended", "账号已被停用")
+	}
+	// Persist at most one activity write per minute per session. Epoch values
+	// avoid lexicographic timestamp ordering and the predicate never regresses.
+	now := s.now().UTC().Unix()
+	if lastActive <= now-60 {
+		if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_active_unix = ? WHERE id = ? AND revoked_at IS NULL AND last_active_unix <= ?`, now, sessionID, now-60); err != nil {
+			return User{}, "", fmt.Errorf("record session activity: %w", err)
+		}
 	}
 	user.Name = user.DisplayName
 	return user, sessionID, nil
@@ -412,10 +426,10 @@ type sqlRunner interface {
 
 func insertSession(ctx context.Context, runner sqlRunner, session Session, userID string, now time.Time) error {
 	_, err := runner.ExecContext(ctx, `
-		INSERT INTO sessions(id, user_id, access_hash, refresh_hash, access_expires_at, refresh_expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, session.SessionID, userID,
+		INSERT INTO sessions(id, user_id, access_hash, refresh_hash, access_expires_at, refresh_expires_at, created_at, last_active_unix)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, session.SessionID, userID,
 		tokenHash(session.AccessToken), tokenHash(session.RefreshToken),
-		now.Add(accessLifetime).Format(time.RFC3339Nano), now.Add(refreshLifetime).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		now.Add(accessLifetime).Format(time.RFC3339Nano), now.Add(refreshLifetime).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Unix())
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}

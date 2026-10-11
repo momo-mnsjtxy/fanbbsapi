@@ -69,3 +69,18 @@ func page(offset, limit int) (int, int) {
 	}
 	return offset, limit
 }
+
+// lockUser serializes a user's cart, address and award transactions before any
+// read/check/write decisions. It leaves user data unchanged and prevents races
+// on a missing cart, initial default address or first idempotency record.
+func (s *Service) lockUser(ctx context.Context, tx *sql.Tx, userID string) error {
+	var id string
+	err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id FROM users WHERE id = ? AND status = 'active'`), userID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return platform.Problem(http.StatusNotFound, "user_not_found", "用户不存在")
+	}
+	if err != nil {
+		return fmt.Errorf("lock commerce owner: %w", err)
+	}
+	return nil
+}
