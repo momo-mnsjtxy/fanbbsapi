@@ -125,3 +125,32 @@ func (s *Service) ownerActivityHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	platform.WriteList(w, r, items, next)
 }
+
+// Restoring writes a new revision instead of mutating or deleting history. Media
+// attachments remain current because text revisions do not archive file blobs.
+func (s *Service) restorePostRevisionHTTP(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Version int    `json:"version"`
+		Reason  string `json:"reason"`
+	}
+	if err := platform.DecodeJSON(w, r, &input); err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	if input.Version < 1 {
+		platform.WriteError(w, r, platform.Validation(map[string][]string{"version": {"请选择有效的历史版本"}}))
+		return
+	}
+	expected, err := ifMatchVersion(r)
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	owner, _ := identity.UserFromContext(r.Context())
+	item, err := s.UpdatePost(r.Context(), postID(r), owner.ID, expected, UpdatePostInput{RestoreRevision: input.Version, RestoreReason: input.Reason})
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	platform.WriteData(w, r, http.StatusOK, item)
+}

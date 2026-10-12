@@ -17,17 +17,20 @@ import (
 )
 
 type UpdatePostInput struct {
-	Title      *string   `json:"title"`
-	Summary    *string   `json:"summary"`
-	Body       *string   `json:"body"`
-	Content    *string   `json:"content"`
-	CategoryID *string   `json:"category_id"`
-	TagIDs     *[]string `json:"tag_ids"`
-	Visibility *string   `json:"visibility"`
+	RestoreRevision int       `json:"-"`
+	RestoreReason   string    `json:"-"`
+	MediaIDs        *[]string `json:"media_ids"`
+	Title           *string   `json:"title"`
+	Summary         *string   `json:"summary"`
+	Body            *string   `json:"body"`
+	Content         *string   `json:"content"`
+	CategoryID      *string   `json:"category_id"`
+	TagIDs          *[]string `json:"tag_ids"`
+	Visibility      *string   `json:"visibility"`
 }
 
 func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expectedVersion int, input UpdatePostInput) (Post, error) {
-	if input.Title == nil && input.Summary == nil && input.Body == nil && input.Content == nil && input.CategoryID == nil && input.TagIDs == nil && input.Visibility == nil {
+	if input.Title == nil && input.Summary == nil && input.Body == nil && input.Content == nil && input.CategoryID == nil && input.TagIDs == nil && input.Visibility == nil && input.MediaIDs == nil && input.RestoreRevision == 0 {
 		return Post{}, platform.Validation(map[string][]string{"post": {"至少提供一个需要更新的字段"}})
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -64,6 +67,29 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 	}
 	if version != expectedVersion {
 		return Post{}, platform.Problem(http.StatusConflict, "version_conflict", "文章已被其他操作更新，请刷新后重试")
+	}
+	if input.RestoreRevision > 0 {
+		if len([]rune(strings.TrimSpace(input.RestoreReason))) < 3 || len([]rune(input.RestoreReason)) > 500 {
+			return Post{}, platform.Validation(map[string][]string{"reason": {"恢复说明长度必须为 3 到 500 个字符"}})
+		}
+		var oldTitle, oldSummary, oldBody, oldCategory, oldVisibility, encodedTags string
+		err := tx.QueryRowContext(ctx, `SELECT title,summary,body,COALESCE(category_id,''),visibility,tag_ids FROM post_revisions WHERE post_id=? AND version=?`, postID, input.RestoreRevision).Scan(&oldTitle, &oldSummary, &oldBody, &oldCategory, &oldVisibility, &encodedTags)
+		if err == sql.ErrNoRows {
+			return Post{}, platform.Problem(http.StatusNotFound, "revision_not_found", "历史版本不存在")
+		}
+		if err != nil {
+			return Post{}, err
+		}
+		var oldTags []string
+		if err := json.Unmarshal([]byte(encodedTags), &oldTags); err != nil {
+			return Post{}, err
+		}
+		input.Title = &oldTitle
+		input.Summary = &oldSummary
+		input.Body = &oldBody
+		input.CategoryID = &oldCategory
+		input.Visibility = &oldVisibility
+		input.TagIDs = &oldTags
 	}
 	tagIDs := []string{}
 	tagRows, err := tx.QueryContext(ctx, `SELECT tag_id FROM post_tags WHERE post_id = ? ORDER BY tag_id`, postID)
@@ -161,6 +187,11 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 			}
 		}
 	}
+	if input.MediaIDs != nil {
+		if err := s.replacePostMedia(ctx, tx, postID, authorID, *input.MediaIDs); err != nil {
+			return Post{}, err
+		}
+	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE posts SET title = ?, summary = ?, body = ?, category_id = ?, visibility = ?, version = version + 1
 		WHERE id = ? AND author_id = ? AND version = ? AND status <> 'deleted'`, title, summary, body, category, visibility, postID, authorID, expectedVersion)
@@ -170,6 +201,11 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 	changed, _ := result.RowsAffected()
 	if changed != 1 {
 		return Post{}, platform.Problem(http.StatusConflict, "version_conflict", "文章已被其他操作更新，请刷新后重试")
+	}
+	if input.RestoreRevision > 0 {
+		if err := insertAudit(ctx, tx, authorID, "post_revision_restore", "post", postID, map[string]any{"version": version}, map[string]any{"version": version + 1, "source_revision": input.RestoreRevision}, strings.TrimSpace(input.RestoreReason), platform.RequestID(ctx), s.now().UTC()); err != nil {
+			return Post{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Post{}, fmt.Errorf("commit post update: %w", err)

@@ -188,6 +188,7 @@ paths:
                 category_id: {type: string}
                 tag_ids: {type: array, maxItems: 10, items: {type: string}}
                 visibility: {type: string, enum: [public, followers]}
+                media_ids: {type: array, maxItems: 8, uniqueItems: true, items: {type: string, minLength: 1}, description: Complete ordered replacement; omit to keep attachments or send an empty list to detach all}
       responses:
         '200': {$ref: '#/components/responses/Post'}
         '403': {$ref: '#/components/responses/Error'}
@@ -240,6 +241,31 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
         '429': {$ref: '#/components/responses/Error'}
+  /posts/{post_id}/revisions/restore:
+    post:
+      summary: Restore owned historical text and metadata as a new version
+      operationId: restorePostRevision
+      description: Preserves current attachments and publication status. Pending submissions must be withdrawn first. Missing historical taxonomy is rejected rather than silently changed.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, reason]
+              properties:
+                version: {type: integer, minimum: 1}
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {$ref: '#/components/responses/Post'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
   /posts/{post_id}/revisions:
     get:
       summary: List immutable prior versions of an owned post

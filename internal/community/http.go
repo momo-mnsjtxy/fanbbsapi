@@ -36,6 +36,7 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.Patch("/posts/{postID}", s.updatePostHTTP)
 		protected.Delete("/posts/{postID}", s.deletePostHTTP)
 		protected.Get("/posts/{postID}/revisions", s.postRevisionsHTTP)
+		protected.Post("/posts/{postID}/revisions/restore", s.restorePostRevisionHTTP)
 		protected.Post("/posts/{postID}/comments", s.addComment)
 		protected.Post("/posts/{postID}/comments/{commentID}/replies", s.reply)
 		protected.Patch("/posts/{postID}/comments/{commentID}", s.updateCommentHTTP)

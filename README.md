@@ -198,3 +198,15 @@ Role-gated `/admin/posts/{id}` returns a private submission snapshot; `/admin/po
 `GET /me/reports` provides a private, paginated status-filtered list of the signed-in reporter's submissions and decision reasons. It never includes target content or moderator identity. `GET /admin/reports/{id}` lets moderators inspect current post/comment/user context, including a reply's parent comment, parent post and existing role-gated attachment preview. The web report workbench adds queue pagination, open/decided filters, context inspection and reasoned decisions; the profile page includes personal report history.
 
 Report decisions serialize per report; content removal locks the target and honors optional If-Match, preventing decisions against an edited version and duplicate counter updates. The UI supplies the reviewed version. Existing role checks, immutable audits and notifications remain in the transaction. Compilation, one SQLite comment/context/owner-isolation/version/outcome smoke and frontend build passed; full regression, PostgreSQL concurrency and browser acceptance are deferred.
+
+## Author attachment editing (October 12)
+
+Post PATCH accepts an ordered `media_ids` replacement (up to eight unique ready post-purpose uploads owned by the author). Omission preserves attachments; an empty array detaches all. Other posts' attachments and foreign uploads are rejected. Changes share the text-edit/version transaction and immutable media-change audit; pending submissions must first be withdrawn. Detached blobs are not immediately destroyed and remain subject to existing unreferenced-upload cleanup. The author workspace can select new uploads, reorder and remove existing attachments, and saves everything together; a failed edit abandons only its newly uploaded unreferenced assets.
+
+Minimal validation: Go compilation, one SQLite attachment ordering/ownership/rollback/version/pending-review smoke, OpenAPI validation and Vue SFC compilation. No complete regression, PostgreSQL concurrency or browser acceptance in this feature-first pass.
+
+## Revision recovery (October 12)
+
+`POST /posts/{id}/revisions/restore` accepts a historical `version`, a 3–500 character `reason` and the current If-Match. Owner authorization, pending-review restrictions and version checks share the existing edit transaction. It snapshots the current content before restoring historical title/summary/body/category/tags/visibility, increments the version and writes an immutable restore audit. Current attachments and publication status are retained. Deleted taxonomy references fail validation instead of silently substituting values. The private author workspace pages old versions, previews full text and metadata, confirms visibility changes, and restores without discarding history.
+
+Validation was one SQLite ownership/version/history/pending-review smoke, Vue SFC compilation and OpenAPI validation only. Full regression, PostgreSQL concurrency and browser acceptance remain pending.
