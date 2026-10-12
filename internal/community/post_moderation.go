@@ -40,6 +40,12 @@ func (s *Service) ModeratePost(ctx context.Context, actor identity.User, request
 		return PostModerationResult{}, fmt.Errorf("begin post moderation: %w", err)
 	}
 	defer tx.Rollback()
+	var lockedID string
+	if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id FROM posts WHERE id=? AND status='draft'`), postID).Scan(&lockedID); err == sql.ErrNoRows {
+		return PostModerationResult{}, platform.Problem(http.StatusConflict, "post_not_reviewable", "稿件已撤回、删除或发布，请刷新队列")
+	} else if err != nil {
+		return PostModerationResult{}, err
+	}
 	var authorID, state string
 	var pinned, recommended int
 	err = tx.QueryRowContext(ctx, `
@@ -60,7 +66,7 @@ func (s *Service) ModeratePost(ctx context.Context, actor identity.User, request
 	if decision == "published" {
 		databaseStatus = "published"
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE posts SET status = ?, published_at = CASE WHEN ? = 'published' THEN ? ELSE published_at END WHERE id = ?`, databaseStatus, decision, stamp, postID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE posts SET status = ?, version = version + 1, published_at = CASE WHEN ? = 'published' THEN ? ELSE published_at END WHERE id = ?`, databaseStatus, decision, stamp, postID); err != nil {
 		return PostModerationResult{}, fmt.Errorf("apply post moderation: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `

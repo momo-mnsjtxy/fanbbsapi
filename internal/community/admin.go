@@ -262,7 +262,7 @@ func (s *Service) AdminContent(ctx context.Context, kind, status, authorID, repo
 		       (SELECT COUNT(*) FROM reports r WHERE r.target_type = content_type AND r.target_id = content_id AND r.status = 'open'), created_at
 		FROM (
 			SELECT 'post' AS content_type, p.id AS content_id, p.author_id,
-			       COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status) AS content_status,
+			       CASE WHEN p.status='deleted' THEN 'deleted' ELSE COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status) END AS content_status,
 			       p.title AS content_title, p.body AS content_body, p.visibility,
 			       COALESCE((SELECT is_pinned FROM post_moderation WHERE post_id = p.id), 0) AS is_pinned,
 			       COALESCE((SELECT is_recommended FROM post_moderation WHERE post_id = p.id), 0) AS is_recommended, p.created_at

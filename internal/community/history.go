@@ -69,7 +69,7 @@ func (s *Service) OwnerActivity(ctx context.Context, ownerID string, offset, lim
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT activity_type, activity_id, action, activity_status, activity_at FROM (
 			SELECT 'post' activity_type, p.id activity_id, 'created' action,
-			       COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status) activity_status, p.created_at activity_at
+			       CASE WHEN p.status='deleted' THEN 'deleted' ELSE COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status) END activity_status, p.created_at activity_at
 			FROM posts p WHERE p.author_id = ?
 			UNION ALL
 			SELECT 'comment', c.id, 'created', c.status, c.created_at FROM comments c WHERE c.author_id = ?

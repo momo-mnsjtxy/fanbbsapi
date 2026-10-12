@@ -182,3 +182,9 @@ Real PostgreSQL tests cover twelve competing same-key checkouts, different-key c
 ### Receipt replay and concurrent leave
 
 Receipt replay reconciles message badges against the effective stored checkpoint even when the requested checkpoint is equal or older (`changed` remains false). Sending, reading and leaving acquire the same per-conversation transaction lock on PostgreSQL. A recipient cannot leave between recipient selection and notification insertion, and a send cannot pass a stale active-member check then commit without recipients. Deterministic PostgreSQL tests pause both message insertion and notification insertion with an advisory-lock gate; leave waits, then clears the committed badge. No data backfill or old-version compatibility path is involved.
+
+## Author draft lifecycle (October 12)
+
+Create with `status: draft` to persist an owner-only draft. Existing versioned post PATCH/DELETE accepts drafts and rejected submissions; pending submissions require withdrawal first. `POST /me/posts/{id}/review` with `If-Match`, `action: submit|withdraw` and a 3–500 character reason moves draft/rejected → pending or pending → draft. Moderation, editing and author transitions serialize on the same post row, advance versions and preserve audit/revision history. The web author workspace includes edit/save, withdraw, resubmit and delete controls, and the composer supports server drafts. Existing direct-publish creation remains unchanged.
+
+Validation for this feature-first pass is compilation, a single SQLite lifecycle smoke case and frontend production build only; complete regression, PostgreSQL concurrency and browser acceptance remain pending.

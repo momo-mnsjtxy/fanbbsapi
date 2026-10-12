@@ -35,11 +35,11 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 		return Post{}, fmt.Errorf("begin post update: %w", err)
 	}
 	defer tx.Rollback()
-	var ownerID, kind, title, summary, body, categoryID, visibility string
+	var ownerID, kind, title, summary, body, categoryID, visibility, status string
 	var version int
-	err = tx.QueryRowContext(ctx, `
-		SELECT author_id, kind, title, summary, body, COALESCE(category_id, ''), visibility, version
-		FROM posts WHERE id = ? AND status = 'published'`, postID).Scan(&ownerID, &kind, &title, &summary, &body, &categoryID, &visibility, &version)
+	err = tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `
+  SELECT author_id, kind, title, summary, body, COALESCE(category_id, ''), visibility, version, status
+  FROM posts WHERE id = ? AND status <> 'deleted'`), postID).Scan(&ownerID, &kind, &title, &summary, &body, &categoryID, &visibility, &version, &status)
 	if err == sql.ErrNoRows {
 		return Post{}, platform.Problem(http.StatusNotFound, "post_not_found", "文章不存在")
 	}
@@ -47,7 +47,17 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 		return Post{}, fmt.Errorf("load post for update: %w", err)
 	}
 	if ownerID != authorID {
+		if status != "published" {
+			return Post{}, platform.Problem(http.StatusNotFound, "post_not_found", "文章不存在")
+		}
 		return Post{}, platform.Problem(http.StatusForbidden, "post_edit_forbidden", "只能编辑自己的文章")
+	}
+	var reviewState string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT state FROM post_moderation WHERE post_id = ?),'')`, postID).Scan(&reviewState); err != nil {
+		return Post{}, err
+	}
+	if reviewState == "pending" {
+		return Post{}, platform.Problem(http.StatusConflict, "post_review_pending", "待审核稿件请先撤回再编辑")
 	}
 	if kind == "repost" {
 		return Post{}, platform.Problem(http.StatusConflict, "repost_not_editable", "转发内容不能编辑")
@@ -153,7 +163,7 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE posts SET title = ?, summary = ?, body = ?, category_id = ?, visibility = ?, version = version + 1
-		WHERE id = ? AND author_id = ? AND version = ? AND status = 'published'`, title, summary, body, category, visibility, postID, authorID, expectedVersion)
+		WHERE id = ? AND author_id = ? AND version = ? AND status <> 'deleted'`, title, summary, body, category, visibility, postID, authorID, expectedVersion)
 	if err != nil {
 		return Post{}, fmt.Errorf("update post: %w", err)
 	}
@@ -164,7 +174,7 @@ func (s *Service) UpdatePost(ctx context.Context, postID, authorID string, expec
 	if err := tx.Commit(); err != nil {
 		return Post{}, fmt.Errorf("commit post update: %w", err)
 	}
-	return s.Post(ctx, postID, authorID)
+	return s.postForOwner(ctx, postID, authorID)
 }
 
 func (s *Service) DeletePost(ctx context.Context, postID, authorID string, expectedVersion int) (int, error) {
@@ -173,9 +183,9 @@ func (s *Service) DeletePost(ctx context.Context, postID, authorID string, expec
 		return 0, fmt.Errorf("begin post delete: %w", err)
 	}
 	defer tx.Rollback()
-	var ownerID, kind, repostOf string
+	var ownerID, kind, repostOf, status string
 	var version int
-	err = tx.QueryRowContext(ctx, `SELECT author_id, kind, COALESCE(repost_of, ''), version FROM posts WHERE id = ? AND status = 'published'`, postID).Scan(&ownerID, &kind, &repostOf, &version)
+	err = tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT author_id, kind, COALESCE(repost_of, ''), version, status FROM posts WHERE id = ? AND status <> 'deleted'`), postID).Scan(&ownerID, &kind, &repostOf, &version, &status)
 	if err == sql.ErrNoRows {
 		return 0, platform.Problem(http.StatusNotFound, "post_not_found", "文章不存在")
 	}
@@ -183,7 +193,17 @@ func (s *Service) DeletePost(ctx context.Context, postID, authorID string, expec
 		return 0, fmt.Errorf("load post for delete: %w", err)
 	}
 	if ownerID != authorID {
+		if status != "published" {
+			return 0, platform.Problem(http.StatusNotFound, "post_not_found", "文章不存在")
+		}
 		return 0, platform.Problem(http.StatusForbidden, "post_delete_forbidden", "只能删除自己的文章")
+	}
+	var reviewState string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT state FROM post_moderation WHERE post_id=?),'')`, postID).Scan(&reviewState); err != nil {
+		return 0, err
+	}
+	if reviewState == "pending" {
+		return 0, platform.Problem(http.StatusConflict, "post_review_pending", "待审核稿件请先撤回再删除")
 	}
 	if version != expectedVersion {
 		return 0, platform.Problem(http.StatusConflict, "version_conflict", "文章已被其他操作更新，请刷新后重试")
@@ -196,7 +216,7 @@ func (s *Service) DeletePost(ctx context.Context, postID, authorID string, expec
 			return 0, fmt.Errorf("decrement original repost count: %w", err)
 		}
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE posts SET status = 'deleted', version = version + 1 WHERE id = ? AND author_id = ? AND version = ? AND status = 'published'`, postID, authorID, expectedVersion)
+	result, err := tx.ExecContext(ctx, `UPDATE posts SET status = 'deleted', version = version + 1 WHERE id = ? AND author_id = ? AND version = ? AND status <> 'deleted'`, postID, authorID, expectedVersion)
 	if err != nil {
 		return 0, fmt.Errorf("delete post: %w", err)
 	}

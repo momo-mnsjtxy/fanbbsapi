@@ -672,6 +672,31 @@ paths:
         '200': {$ref: '#/components/responses/PostList'}
         '401': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /me/posts/{post_id}/review:
+    post:
+      summary: Submit a private draft or withdraw a pending submission
+      description: Owner-only versioned transition. Rejected posts may be edited and resubmitted; pending posts must be withdrawn before editing or deleting. Publication remains a moderator decision. Every transition is audited.
+      operationId: transitionMySubmission
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, reason]
+              properties:
+                action: {type: string, enum: [submit, withdraw]}
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {$ref: '#/components/responses/Post'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /me/posts/{post_id}:
     get:
       summary: Inspect an author's own submission and private review reason
@@ -2024,7 +2049,7 @@ components:
         tag_ids: {type: array, maxItems: 10, uniqueItems: true, items: {type: string}}
         media_ids: {type: array, maxItems: 8, uniqueItems: true, items: {type: string}}
         visibility: {type: string, enum: [public, followers], default: public}
-        status: {type: string, enum: [pending], description: Explicitly submit for moderator review; omit for the backward-compatible immediate-publish flow.}
+        status: {type: string, enum: [pending, draft], description: Save privately as draft or submit for moderator review; omit to publish immediately.}
       anyOf: [{required: [content]}, {required: [body]}]
     Session:
       type: object

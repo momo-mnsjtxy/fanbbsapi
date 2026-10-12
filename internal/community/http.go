@@ -68,6 +68,7 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.Get("/me/activity", s.ownerActivityHTTP)
 		protected.Get("/me/posts", s.ownerPostsHTTP)
 		protected.Get("/me/posts/{postID}", s.ownerPostHTTP)
+		protected.Post("/me/posts/{postID}/review", s.transitionSubmissionHTTP)
 		protected.Get("/notifications", s.notificationsHTTP)
 		protected.Get("/notifications/counts", s.notificationCountsHTTP)
 		protected.Get("/me/notification-preferences", s.notificationPreferencesHTTP)

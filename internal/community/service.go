@@ -88,8 +88,8 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 	if input.Visibility != "public" && input.Visibility != "followers" {
 		fields["visibility"] = []string{"可见性必须是 public 或 followers"}
 	}
-	if input.Status != "" && input.Status != "pending" {
-		fields["status"] = []string{"status 只能省略或设为 pending"}
+	if input.Status != "" && input.Status != "pending" && input.Status != "draft" {
+		fields["status"] = []string{"status 只能省略或设为 pending、draft"}
 	}
 	if len(input.Summary) > 500 {
 		fields["summary"] = []string{"摘要不能超过 500 个字符"}
@@ -156,7 +156,7 @@ func (s *Service) CreatePost(ctx context.Context, authorID, idempotencyKey strin
 		category = input.CategoryID
 	}
 	databaseStatus := "published"
-	if input.Status == "pending" {
+	if input.Status == "pending" || input.Status == "draft" {
 		databaseStatus = "draft"
 	}
 	_, err = tx.ExecContext(ctx, `
