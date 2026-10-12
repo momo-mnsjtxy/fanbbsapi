@@ -22,7 +22,7 @@ type PostModerationResult struct {
 	DecidedAt   string `json:"decided_at,omitempty"`
 }
 
-func (s *Service) ModeratePost(ctx context.Context, actor identity.User, requestID, postID, decision, reason string) (PostModerationResult, error) {
+func (s *Service) ModeratePost(ctx context.Context, actor identity.User, requestID, postID, decision, reason string, expectedVersion ...int) (PostModerationResult, error) {
 	decision = strings.TrimSpace(decision)
 	reason = strings.TrimSpace(reason)
 	fields := map[string][]string{}
@@ -41,10 +41,14 @@ func (s *Service) ModeratePost(ctx context.Context, actor identity.User, request
 	}
 	defer tx.Rollback()
 	var lockedID string
-	if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id FROM posts WHERE id=? AND status='draft'`), postID).Scan(&lockedID); err == sql.ErrNoRows {
+	var lockedVersion int
+	if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id,version FROM posts WHERE id=? AND status='draft'`), postID).Scan(&lockedID, &lockedVersion); err == sql.ErrNoRows {
 		return PostModerationResult{}, platform.Problem(http.StatusConflict, "post_not_reviewable", "稿件已撤回、删除或发布，请刷新队列")
 	} else if err != nil {
 		return PostModerationResult{}, err
+	}
+	if len(expectedVersion) > 0 && lockedVersion != expectedVersion[0] {
+		return PostModerationResult{}, platform.Problem(http.StatusConflict, "version_conflict", "稿件已变更，请重新打开后再作决定")
 	}
 	var authorID, state string
 	var pinned, recommended int
@@ -80,7 +84,7 @@ func (s *Service) ModeratePost(ctx context.Context, actor identity.User, request
 		return PostModerationResult{}, platform.Problem(http.StatusConflict, "moderation_already_decided", "文章审核状态已经变更")
 	}
 	if err := insertAudit(ctx, tx, actor.ID, "post_moderation_decision", "post", postID,
-		map[string]any{"state": state}, map[string]any{"state": decision}, reason, requestID, now); err != nil {
+		map[string]any{"state": state, "version": lockedVersion}, map[string]any{"state": decision, "version": lockedVersion + 1}, reason, requestID, now); err != nil {
 		return PostModerationResult{}, err
 	}
 	if err := addNotification(ctx, tx, authorID, actor.ID, "moderation", "post", postID, map[string]string{"decision": decision}, now); err != nil {
@@ -166,8 +170,17 @@ func (s *Service) moderatePostHTTP(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, r, err)
 		return
 	}
+	var expected []int
+	if r.Header.Get("If-Match") != "" {
+		version, err := ifMatchVersion(r)
+		if err != nil {
+			platform.WriteError(w, r, err)
+			return
+		}
+		expected = []int{version}
+	}
 	actor, _ := identity.UserFromContext(r.Context())
-	item, err := s.ModeratePost(r.Context(), actor, platform.RequestID(r.Context()), postID(r), input.Decision, input.Reason)
+	item, err := s.ModeratePost(r.Context(), actor, platform.RequestID(r.Context()), postID(r), input.Decision, input.Reason, expected...)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return

@@ -1020,6 +1020,41 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}:
+    get:
+      summary: Read a private moderation snapshot of an undeleted post
+      operationId: reviewSubmissionDetail
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/PostID'}]
+      responses:
+        '200': {description: Moderator/admin-only post and moderation snapshot; private no-store caching}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}/media/{media_id}:
+    get:
+      summary: Preview an attachment linked to a specific reviewed post
+      operationId: reviewSubmissionMedia
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/MediaID'}
+      responses:
+        '200': {description: Authenticated moderator/admin attachment bytes; private no-store caching}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}/review-history:
+    get:
+      summary: Page immutable submission and review decisions for one post
+      operationId: reviewSubmissionHistory
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Immutable transition history with actor, reason, before/after state and reviewed versions}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /admin/posts/{post_id}/moderation:
     post:
       summary: Transition an explicitly pending post to published or rejected
