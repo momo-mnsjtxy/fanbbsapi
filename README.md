@@ -192,3 +192,9 @@ Validation for this feature-first pass is compilation, a single SQLite lifecycle
 ## Moderator workbench (October 12)
 
 Role-gated `/admin/posts/{id}` returns a private submission snapshot; `/admin/posts/{id}/media/{mediaId}` previews only ready post-purpose media actually attached to that post, always no-store; `/admin/posts/{id}/review-history` returns only submission/decision audit entries for that post. Ordinary public/author media routes gain no moderator bypass. Decisions honor If-Match when supplied and audit the reviewed/resulting versions. The web workbench supplies the snapshot version, displays full content and authenticated attachments, pages queues/history, takes reasoned decisions and manages published pin/recommend controls. A focused role/media/version smoke and Vite build passed; full regression/PG/browser acceptance remains pending.
+
+## Report resolution workspace (October 12)
+
+`GET /me/reports` provides a private, paginated status-filtered list of the signed-in reporter's submissions and decision reasons. It never includes target content or moderator identity. `GET /admin/reports/{id}` lets moderators inspect current post/comment/user context, including a reply's parent comment, parent post and existing role-gated attachment preview. The web report workbench adds queue pagination, open/decided filters, context inspection and reasoned decisions; the profile page includes personal report history.
+
+Report decisions serialize per report; content removal locks the target and honors optional If-Match, preventing decisions against an edited version and duplicate counter updates. The UI supplies the reviewed version. Existing role checks, immutable audits and notifications remain in the transaction. Compilation, one SQLite comment/context/owner-isolation/version/outcome smoke and frontend build passed; full regression, PostgreSQL concurrency and browser acceptance are deferred.

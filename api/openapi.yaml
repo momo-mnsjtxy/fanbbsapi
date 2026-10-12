@@ -966,6 +966,40 @@ paths:
         '201': {description: Report created, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
         '200': {description: Idempotent replay, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
         '409': {$ref: '#/components/responses/Error'}
+  /me/reports:
+    get:
+      summary: List the authenticated reporter's own submissions and outcomes
+      operationId: listMyReports
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [open, dismissed, actioned]}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Private no-store page without target content or moderator identity
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReportListEnvelope'}}}
+  /admin/reports/{report_id}:
+    get:
+      summary: Inspect report and current target with comment parent and post context
+      operationId: getReportContext
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ReportID'}]
+      responses:
+        '200':
+          description: Moderator-only no-store report and target snapshot; target version supports If-Match on removal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      report: {$ref: '#/components/schemas/Report'}
+                      target: {type: object, additionalProperties: true}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /admin/reports:
     get:
       summary: List the moderation report queue
@@ -985,7 +1019,9 @@ paths:
       summary: Decide a report and atomically write notifications plus audit
       operationId: decideAdminReport
       security: [{bearerAuth: []}]
-      parameters: [{$ref: '#/components/parameters/ReportID'}]
+      parameters:
+        - {$ref: '#/components/parameters/ReportID'}
+        - {name: If-Match, in: header, required: false, description: Quoted current content version for remove_content, schema: {type: string}}
       requestBody:
         required: true
         content:

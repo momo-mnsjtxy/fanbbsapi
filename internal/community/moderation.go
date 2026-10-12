@@ -174,7 +174,7 @@ func (s *Service) Reports(ctx context.Context, status string, offset, limit int)
 	return items, next, rows.Err()
 }
 
-func (s *Service) DecideReport(ctx context.Context, actor identity.User, requestID, reportID, decision, reason string) (Report, error) {
+func (s *Service) DecideReport(ctx context.Context, actor identity.User, requestID, reportID, decision, reason string, expectedVersion ...int) (Report, error) {
 	decision = strings.TrimSpace(decision)
 	reason = strings.TrimSpace(reason)
 	if decision != "dismiss" && decision != "remove_content" && decision != "suspend_user" {
@@ -192,7 +192,7 @@ func (s *Service) DecideReport(ctx context.Context, actor identity.User, request
 	}
 	defer tx.Rollback()
 	var item Report
-	err = tx.QueryRowContext(ctx, `SELECT id, reporter_id, target_type, target_id, reason, status, created_at FROM reports WHERE id = ?`, reportID).Scan(
+	err = tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id, reporter_id, target_type, target_id, reason, status, created_at FROM reports WHERE id = ?`), reportID).Scan(
 		&item.ID, &item.ReporterID, &item.TargetType, &item.TargetID, &item.Reason, &item.Status, &item.CreatedAt)
 	if err == sql.ErrNoRows {
 		return Report{}, platform.Problem(http.StatusNotFound, "report_not_found", "举报不存在")
@@ -214,8 +214,12 @@ func (s *Service) DecideReport(ctx context.Context, actor identity.User, request
 	if decision == "remove_content" {
 		if item.TargetType == "comment" {
 			var postID, commentStatus string
-			if err := tx.QueryRowContext(ctx, `SELECT author_id, post_id, status FROM comments WHERE id = ?`, item.TargetID).Scan(&targetAuthor, &postID, &commentStatus); err != nil {
+			var version int
+			if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT author_id, post_id, status, version FROM comments WHERE id = ?`), item.TargetID).Scan(&targetAuthor, &postID, &commentStatus, &version); err != nil {
 				return Report{}, fmt.Errorf("load moderated comment: %w", err)
+			}
+			if len(expectedVersion) > 0 && version != expectedVersion[0] {
+				return Report{}, platform.Problem(http.StatusConflict, "version_conflict", "评论已更新，请重新查看后处理")
 			}
 			if commentStatus != "published" {
 				return Report{}, platform.Problem(http.StatusConflict, "target_already_changed", "举报对象已经发生变化")
@@ -228,8 +232,12 @@ func (s *Service) DecideReport(ctx context.Context, actor identity.User, request
 			}
 		} else {
 			var kind, repostOf, postStatus string
-			if err := tx.QueryRowContext(ctx, `SELECT author_id, kind, COALESCE(repost_of, ''), status FROM posts WHERE id = ?`, item.TargetID).Scan(&targetAuthor, &kind, &repostOf, &postStatus); err != nil {
+			var version int
+			if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT author_id, kind, COALESCE(repost_of, ''), status, version FROM posts WHERE id = ?`), item.TargetID).Scan(&targetAuthor, &kind, &repostOf, &postStatus, &version); err != nil {
 				return Report{}, fmt.Errorf("load moderated post: %w", err)
+			}
+			if len(expectedVersion) > 0 && version != expectedVersion[0] {
+				return Report{}, platform.Problem(http.StatusConflict, "version_conflict", "帖子已更新，请重新查看后处理")
 			}
 			if postStatus != "published" {
 				return Report{}, platform.Problem(http.StatusConflict, "target_already_changed", "举报对象已经发生变化")
@@ -360,8 +368,17 @@ func (s *Service) decideReportHTTP(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, r, err)
 		return
 	}
+	var expected []int
+	if r.Header.Get("If-Match") != "" {
+		version, err := ifMatchVersion(r)
+		if err != nil {
+			platform.WriteError(w, r, err)
+			return
+		}
+		expected = []int{version}
+	}
 	actor, _ := identity.UserFromContext(r.Context())
-	item, err := s.DecideReport(r.Context(), actor, platform.RequestID(r.Context()), chi.URLParam(r, "reportID"), input.Decision, input.Reason)
+	item, err := s.DecideReport(r.Context(), actor, platform.RequestID(r.Context()), chi.URLParam(r, "reportID"), input.Decision, input.Reason, expected...)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return
