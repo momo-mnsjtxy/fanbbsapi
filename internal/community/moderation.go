@@ -191,6 +191,11 @@ func (s *Service) DecideReport(ctx context.Context, actor identity.User, request
 		return Report{}, fmt.Errorf("begin report decision: %w", err)
 	}
 	defer tx.Rollback()
+	if decision == "suspend_user" {
+		if err := s.lockAdminAccounts(ctx, tx); err != nil {
+			return Report{}, err
+		}
+	}
 	var item Report
 	err = tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id, reporter_id, target_type, target_id, reason, status, created_at FROM reports WHERE id = ?`), reportID).Scan(
 		&item.ID, &item.ReporterID, &item.TargetType, &item.TargetID, &item.Reason, &item.Status, &item.CreatedAt)
@@ -256,6 +261,22 @@ func (s *Service) DecideReport(ctx context.Context, actor identity.User, request
 		}
 	}
 	if decision == "suspend_user" {
+		if actor.ID == item.TargetID {
+			return Report{}, platform.Problem(http.StatusConflict, "self_suspension_forbidden", "不能停用自己的管理员账号")
+		}
+		var targetRole, targetStatus string
+		if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT role,status FROM users WHERE id=?`), item.TargetID).Scan(&targetRole, &targetStatus); err != nil {
+			return Report{}, err
+		}
+		if targetRole == "admin" && targetStatus == "active" {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'`).Scan(&count); err != nil {
+				return Report{}, err
+			}
+			if count <= 1 {
+				return Report{}, platform.Problem(http.StatusConflict, "last_admin_required", "至少需要保留一个启用的管理员")
+			}
+		}
 		targetAuthor = item.TargetID
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET status = 'suspended', updated_at = ? WHERE id = ?`, s.now().UTC().Format(time.RFC3339Nano), item.TargetID); err != nil {
 			return Report{}, fmt.Errorf("suspend reported user: %w", err)

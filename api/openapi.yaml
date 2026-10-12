@@ -1212,6 +1212,49 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /admin/users/{user_id}:
+    get:
+      summary: Read administrator-only account details and safe aggregate counts
+      operationId: getAdminUser
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      responses:
+        '200': {description: Private no-store account and active-session/post/report counts; no authentication secrets}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /admin/users/{user_id}/moderation-history:
+    get:
+      summary: Read scoped account status, session revocation and report decision history
+      operationId: getAdminUserModerationHistory
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/UserID'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Administrator-only private no-store audit page}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /admin/users/{user_id}/sessions/revoke:
+    post:
+      summary: Revoke another account's existing sessions without suspending login
+      operationId: revokeAdminUserSessions
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/UserID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {description: Revoked session count and atomic audit; zero count is a no-op}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
   /admin/users/{user_id}/status:
     patch:
       summary: Activate or suspend a user and atomically write an audit event
@@ -2495,6 +2538,7 @@ components:
       required: [status, reason]
       properties:
         status: {type: string, enum: [active, suspended]}
+        expected_status: {type: string, enum: [active, suspended], description: Optional reviewed status; conflicts if the account changed}
         reason: {type: string, minLength: 3, maxLength: 500}
     AdminUserStatusResult:
       type: object

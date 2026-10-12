@@ -144,7 +144,7 @@ func (s *Service) AdminUsers(ctx context.Context, actorID, query, status, role, 
 	return items, next, rows.Err()
 }
 
-func (s *Service) UpdateUserStatus(ctx context.Context, actor identity.User, requestID, targetID, status, reason string) (AdminUser, bool, error) {
+func (s *Service) UpdateUserStatus(ctx context.Context, actor identity.User, requestID, targetID, status, reason string, expectedStatus ...string) (AdminUser, bool, error) {
 	status = strings.TrimSpace(status)
 	reason = strings.TrimSpace(reason)
 	fields := map[string][]string{}
@@ -153,6 +153,9 @@ func (s *Service) UpdateUserStatus(ctx context.Context, actor identity.User, req
 	}
 	if len([]rune(reason)) < 3 || len([]rune(reason)) > 500 {
 		fields["reason"] = []string{"理由长度必须为 3 到 500 个字符"}
+	}
+	if len(expectedStatus) > 0 && expectedStatus[0] != "" && expectedStatus[0] != "active" && expectedStatus[0] != "suspended" {
+		fields["expected_status"] = []string{"expected_status 必须为 active 或 suspended"}
 	}
 	if len(fields) > 0 {
 		return AdminUser{}, false, platform.Validation(fields)
@@ -165,14 +168,22 @@ func (s *Service) UpdateUserStatus(ctx context.Context, actor identity.User, req
 		return AdminUser{}, false, fmt.Errorf("begin user status update: %w", err)
 	}
 	defer tx.Rollback()
+	if status == "suspended" {
+		if err := s.lockAdminAccounts(ctx, tx); err != nil {
+			return AdminUser{}, false, err
+		}
+	}
 	var item AdminUser
-	err = tx.QueryRowContext(ctx, `SELECT rowid, id, handle, email, display_name, role, status, created_at, COALESCE(updated_at, '') FROM users WHERE id = ?`, targetID).
+	err = tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT rowid, id, handle, email, display_name, role, status, created_at, COALESCE(updated_at, '') FROM users WHERE id = ?`), targetID).
 		Scan(&item.rowID, &item.ID, &item.Handle, &item.Email, &item.DisplayName, &item.Role, &item.Status, &item.CreatedAt, &item.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return AdminUser{}, false, platform.Problem(http.StatusNotFound, "user_not_found", "用户不存在")
 	}
 	if err != nil {
 		return AdminUser{}, false, fmt.Errorf("load status target: %w", err)
+	}
+	if len(expectedStatus) > 0 && expectedStatus[0] != "" && item.Status != expectedStatus[0] {
+		return AdminUser{}, false, platform.Problem(http.StatusConflict, "status_conflict", "用户状态已更新，请刷新后操作")
 	}
 	if item.Status == status {
 		return item, false, nil
@@ -561,15 +572,16 @@ func (s *Service) adminUsersHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) updateUserStatusHTTP(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Status string `json:"status"`
-		Reason string `json:"reason"`
+		Status         string `json:"status"`
+		Reason         string `json:"reason"`
+		ExpectedStatus string `json:"expected_status"`
 	}
 	if err := platform.DecodeJSON(w, r, &input); err != nil {
 		platform.WriteError(w, r, err)
 		return
 	}
 	actor, _ := identity.UserFromContext(r.Context())
-	item, changed, err := s.UpdateUserStatus(r.Context(), actor, platform.RequestID(r.Context()), chi.URLParam(r, "userID"), input.Status, input.Reason)
+	item, changed, err := s.UpdateUserStatus(r.Context(), actor, platform.RequestID(r.Context()), chi.URLParam(r, "userID"), input.Status, input.Reason, input.ExpectedStatus)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return
@@ -661,4 +673,21 @@ func (s *Service) deleteTaxonomyHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	platform.WriteData(w, r, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+// Lock the small administrator set in deterministic order before a suspension.
+// Both direct status controls and report decisions share this last-admin guard.
+func (s *Service) lockAdminAccounts(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT id FROM users WHERE role='admin' ORDER BY id`))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
