@@ -1062,6 +1062,30 @@ paths:
         '200': {description: Decided report, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
         '403': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}/comments-lock:
+    put:
+      summary: Close or reopen new comments and replies with an audited reason
+      operationId: setPostCommentLock
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [locked, reason]
+              properties:
+                locked: {type: boolean}
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {description: Moderator-only state with version and changed; existing discussion remains readable}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
   /admin/content:
     get:
       summary: List posts and comments for moderation review
@@ -2046,6 +2070,7 @@ components:
         version: {type: integer}
         pinned: {type: boolean}
         recommended: {type: boolean}
+        comments_locked: {type: boolean, description: New comments and replies are paused; existing comments remain readable}
         like_count: {type: integer}
         comment_count: {type: integer}
         repost_count: {type: integer}

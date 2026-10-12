@@ -334,7 +334,7 @@ func visiblePostArgs(viewerID string) []any {
 
 const postSelect = `
 	SELECT p.id, p.kind, COALESCE(p.repost_of, ''), p.title, p.summary, p.body,
-	       COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status), p.visibility, p.version,
+	       COALESCE((SELECT state FROM post_moderation WHERE post_id = p.id), p.status), p.visibility, p.version, p.comments_locked,
 	       COALESCE((SELECT is_pinned FROM post_moderation WHERE post_id = p.id), 0),
 	       COALESCE((SELECT is_recommended FROM post_moderation WHERE post_id = p.id), 0), p.like_count, p.comment_count,
 	       p.repost_count, p.created_at, p.published_at,
@@ -363,10 +363,10 @@ func scanPost(row scanner) (Post, error) {
 	var post Post
 	var category Category
 	var liked, reposted, bookmarked bool
-	var pinned, recommended int
+	var pinned, recommended, commentsLocked int
 	var tagData, mediaData string
 	err := row.Scan(&post.ID, &post.Kind, &post.RepostOf, &post.Title, &post.Summary, &post.Body,
-		&post.Status, &post.Visibility, &post.Version, &pinned, &recommended, &post.LikeCount, &post.CommentCount,
+		&post.Status, &post.Visibility, &post.Version, &commentsLocked, &pinned, &recommended, &post.LikeCount, &post.CommentCount,
 		&post.RepostCount, &post.CreatedAt, &post.PublishedAt,
 		&post.Author.ID, &post.Author.Handle, &post.Author.DisplayName, &post.Author.AvatarURL,
 		&category.ID, &category.Slug, &category.Name, &category.Description, &category.ImageURL, &category.BackgroundURL,
@@ -397,6 +397,7 @@ func scanPost(row scanner) (Post, error) {
 		}
 	}
 	post.Liked = liked
+	post.CommentsLocked = commentsLocked != 0
 	post.Pinned = pinned != 0
 	post.Recommended = recommended != 0
 	post.Reposted = reposted
@@ -572,10 +573,14 @@ func (s *Service) AddComment(ctx context.Context, postID, authorID, parentID, id
 		}
 	}
 	var recipientID string
-	if err := tx.QueryRowContext(ctx, `SELECT p.author_id FROM posts p WHERE p.id = ? AND `+visiblePostPredicate, append([]any{postID}, visiblePostArgs(authorID)...)...).Scan(&recipientID); err == sql.ErrNoRows {
+	var commentsLocked int
+	if err := tx.QueryRowContext(ctx, platform.ForNoKeyUpdate(s.db, `SELECT p.author_id,p.comments_locked FROM posts p WHERE p.id = ? AND `+visiblePostPredicate), append([]any{postID}, visiblePostArgs(authorID)...)...).Scan(&recipientID, &commentsLocked); err == sql.ErrNoRows {
 		return Comment{}, false, platform.Problem(http.StatusNotFound, "post_not_found", "文章不存在")
 	} else if err != nil {
 		return Comment{}, false, fmt.Errorf("check comment target: %w", err)
+	}
+	if commentsLocked != 0 {
+		return Comment{}, false, platform.Problem(http.StatusConflict, "comments_locked", "这篇帖子的评论已关闭")
 	}
 	depth := 0
 	rootID := ""

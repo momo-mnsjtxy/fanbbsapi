@@ -99,6 +99,7 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.With(auth.RequireRole("moderator", "admin")).Get("/admin/posts/{postID}/review-history", s.submissionHistoryHTTP)
 		protected.With(auth.RequireRole("moderator", "admin")).Get("/admin/posts/{postID}/media/{mediaID}", s.adminSubmissionMediaHTTP)
 		protected.With(auth.RequireRole("moderator", "admin")).Patch("/admin/posts/{postID}/controls", s.updatePostControlsHTTP)
+		protected.With(auth.RequireRole("moderator", "admin")).Put("/admin/posts/{postID}/comments-lock", s.commentLockHTTP)
 		protected.With(auth.RequireRole("admin")).Get("/admin/users", s.adminUsersHTTP)
 		protected.With(auth.RequireRole("admin")).Patch("/admin/users/{userID}/status", s.updateUserStatusHTTP)
 		protected.With(auth.RequireRole("admin")).Post("/admin/categories", s.createTaxonomyHTTP)
