@@ -83,7 +83,7 @@ func (s *Service) submissionHistoryHTTP(w http.ResponseWriter, r *http.Request) 
 		platform.WriteError(w, r, err)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id,actor_id,action,reason,before_value,after_value,created_at FROM audit_events WHERE target_type='post' AND target_id=? AND action IN ('submission_submit','submission_withdraw','post_moderation_decision','post_comments_lock','post_feed_controls_update') ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, postID(r), limit+1, offset)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id,actor_id,action,reason,before_value,after_value,created_at FROM audit_events WHERE target_type='post' AND target_id=? AND action IN ('submission_submit','submission_withdraw','post_moderation_decision','post_comments_lock','post_feed_controls_update','post_moderation_remove') ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, postID(r), limit+1, offset)
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"fanbbs.local/backend/internal/identity"
@@ -50,14 +51,33 @@ func (s *Service) OwnerPost(ctx context.Context, ownerID, postID string) (OwnerP
 	return result, nil
 }
 
-func (s *Service) OwnerPosts(ctx context.Context, ownerID, status, rawCursor string, limit int) ([]Post, string, error) {
+type OwnerPostFilters struct {
+	Query string
+	Kind  string
+}
+
+func (s *Service) OwnerPosts(ctx context.Context, ownerID, status, rawCursor string, limit int, options ...OwnerPostFilters) ([]Post, string, error) {
 	if limit < 1 || limit > 50 {
 		return nil, "", platform.Validation(map[string][]string{"limit": {"limit 必须是 1 到 50 的整数"}})
 	}
 	if status != "" && status != "published" && status != "pending" && status != "rejected" && status != "draft" {
 		return nil, "", platform.Validation(map[string][]string{"status": {"文章状态无效"}})
 	}
+	query, kind := "", ""
+	if len(options) > 0 {
+		query = strings.TrimSpace(options[0].Query)
+		kind = strings.TrimSpace(options[0].Kind)
+	}
+	if len([]rune(query)) > 100 || strings.ContainsRune(query, 0) {
+		return nil, "", platform.Validation(map[string][]string{"q": {"搜索词不能超过 100 个字符或包含空字符"}})
+	}
+	if kind != "" && kind != "article" && kind != "image" && kind != "video" && kind != "repost" {
+		return nil, "", platform.Validation(map[string][]string{"kind": {"稿件类型无效"}})
+	}
 	scope := "owner-posts:" + ownerID + ":" + status
+	if query != "" || kind != "" {
+		scope += ":" + kind + ":" + query
+	}
 	cursor, err := decodeSeekCursor(rawCursor, scope)
 	if err != nil {
 		return nil, "", err
@@ -75,6 +95,15 @@ func (s *Service) OwnerPosts(ctx context.Context, ownerID, status, rawCursor str
 	if status != "" {
 		where += ` AND COALESCE((SELECT state FROM post_moderation WHERE post_id=p.id),p.status)=?`
 		args = append(args, status)
+	}
+	if kind != "" {
+		where += ` AND p.kind=?`
+		args = append(args, kind)
+	}
+	if query != "" {
+		pattern := "%" + escapeLike(query) + "%"
+		where += ` AND (p.title LIKE ? ESCAPE '\' OR p.summary LIKE ? ESCAPE '\' OR p.body LIKE ? ESCAPE '\')`
+		args = append(args, pattern, pattern, pattern)
 	}
 	if rawCursor != "" {
 		where += ` AND (p.created_at < ? OR (p.created_at = ? AND p.id < ?))`
@@ -113,11 +142,12 @@ func (s *Service) ownerPostsHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current, _ := identity.UserFromContext(r.Context())
-	items, next, err := s.OwnerPosts(r.Context(), current.ID, r.URL.Query().Get("status"), r.URL.Query().Get("cursor"), limit)
+	items, next, err := s.OwnerPosts(r.Context(), current.ID, r.URL.Query().Get("status"), r.URL.Query().Get("cursor"), limit, OwnerPostFilters{Query: r.URL.Query().Get("q"), Kind: r.URL.Query().Get("kind")})
 	if err != nil {
 		platform.WriteError(w, r, err)
 		return
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	platform.WriteList(w, r, items, next)
 }
 
@@ -128,6 +158,7 @@ func (s *Service) ownerPostHTTP(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, r, err)
 		return
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("ETag", strconv.Quote(strconv.Itoa(item.Post.Version)))
 	platform.WriteData(w, r, http.StatusOK, item)
 }

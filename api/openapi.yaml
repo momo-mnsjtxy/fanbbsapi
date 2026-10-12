@@ -692,6 +692,8 @@ paths:
       security: [{bearerAuth: []}]
       parameters:
         - {name: status, in: query, schema: {type: string, enum: [published, pending, rejected, draft]}}
+        - {name: q, in: query, schema: {type: string, maxLength: 100}, description: Literal substring match against owned title/summary/body}
+        - {name: kind, in: query, schema: {type: string, enum: [article, image, video, repost]}}
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/Limit'}
       responses:
@@ -1071,6 +1073,30 @@ paths:
         '200': {description: Decided report, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
         '403': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+  /admin/posts/{post_id}/remove:
+    post:
+      summary: Remove a reviewed published post directly without a prior report
+      operationId: removeReviewedPost
+      description: Uses existing soft-removal semantics, version check, immutable audit and author notification. Pending or private drafts cannot be removed through this operation. Repost removal updates the corresponding relation and counter.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PostID'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {description: Removed post ID and new version}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
   /admin/posts/{post_id}/comments-lock:
     put:
       summary: Close or reopen new comments and replies with an audited reason
@@ -1095,6 +1121,54 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '428': {$ref: '#/components/responses/Error'}
+  /admin/comments/{comment_id}:
+    get:
+      summary: Inspect a comment with parent comment and private parent-post context
+      operationId: getAdminComment
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: comment_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Moderator/admin-only private no-store context including current version}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /admin/comments/{comment_id}/remove:
+    post:
+      summary: Remove reviewed comment without requiring a prior report
+      operationId: removeReviewedComment
+      description: Atomic soft deletion, one counter decrement, immutable audit and author notice. Descendant replies remain available under existing deleted-ancestor tombstones.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: comment_id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: {type: string, minLength: 3, maxLength: 500}
+      responses:
+        '200': {description: Removed comment ID and new version}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /admin/comments/{comment_id}/moderation-history:
+    get:
+      summary: Read scoped direct-removal and report-decision audit history
+      operationId: getCommentModerationHistory
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: comment_id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Moderator/admin-only private no-store page}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /admin/content:
     get:
       summary: List posts and comments for moderation review
