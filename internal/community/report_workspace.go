@@ -130,3 +130,19 @@ func (s *Service) reportContextHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	platform.WriteData(w, r, http.StatusOK, map[string]any{"report": item, "target": target})
 }
+
+func (s *Service) myReportHTTP(w http.ResponseWriter, r *http.Request) {
+	user, _ := identity.UserFromContext(r.Context())
+	item, err := s.report(r.Context(), chi.URLParam(r, "reportID"))
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && item.ReporterID != user.ID) {
+		platform.WriteError(w, r, platform.Problem(http.StatusNotFound, "report_not_found", "举报不存在"))
+		return
+	}
+	if err != nil {
+		platform.WriteError(w, r, err)
+		return
+	}
+	item.DecidedBy = ""
+	w.Header().Set("Cache-Control", "private, no-store")
+	platform.WriteData(w, r, http.StatusOK, item)
+}

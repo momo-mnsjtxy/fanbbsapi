@@ -992,6 +992,15 @@ paths:
         '201': {description: Report created, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
         '200': {description: Idempotent replay, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
         '409': {$ref: '#/components/responses/Error'}
+  /me/reports/{report_id}:
+    get:
+      summary: Read one owned report outcome without target content or moderator identity
+      operationId: getMyReport
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ReportID'}]
+      responses:
+        '200': {description: Private no-store report outcome, content: {application/json: {schema: {$ref: '#/components/schemas/ReportEnvelope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
   /me/reports:
     get:
       summary: List the authenticated reporter's own submissions and outcomes

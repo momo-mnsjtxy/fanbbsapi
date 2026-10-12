@@ -77,6 +77,7 @@ func (s *Service) Routes(auth *identity.Service) chi.Router {
 		protected.Put("/notifications/read", s.markNotificationsReadHTTP)
 		protected.Post("/reports", s.submitReportHTTP)
 		protected.Get("/me/reports", s.myReportsHTTP)
+		protected.Get("/me/reports/{reportID}", s.myReportHTTP)
 		protected.Post("/uploads", s.uploadHTTP)
 		protected.Delete("/uploads/{mediaID}", s.abandonMediaHTTP)
 		protected.Put("/me/avatar", s.avatarHTTP)

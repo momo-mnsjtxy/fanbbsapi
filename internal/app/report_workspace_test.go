@@ -23,6 +23,11 @@ func TestReportWorkspaceLifecycleSmoke(t *testing.T) {
 	if context["body"] != "Comment requiring review" || context["post"].(map[string]any)["id"] != postID {
 		t.Fatalf("missing comment context: %#v", context)
 	}
+	expectStatus(t, api.request(http.MethodGet, "/api/v1/me/reports/"+reportID, author, nil, nil), http.StatusNotFound)
+	owned := expectStatus(t, api.request(http.MethodGet, "/api/v1/me/reports/"+reportID, admin, nil, nil), http.StatusOK)["data"].(map[string]any)
+	if _, exists := owned["decided_by"]; exists {
+		t.Fatal("reporter detail exposed moderator identity")
+	}
 	others := expectStatus(t, api.request(http.MethodGet, "/api/v1/me/reports", author, nil, nil), http.StatusOK)["data"].([]any)
 	if len(others) != 0 {
 		t.Fatal("report leaked to another account")
